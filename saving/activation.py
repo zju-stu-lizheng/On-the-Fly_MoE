@@ -6,11 +6,11 @@ import numpy as np
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 ### from path.json read paths of model and dataset
 model_name = "Llama3-8b"
 dataset_name = "c4"
-with open('path.json', 'r') as file:
+with open('../path.json', 'r') as file:
     paths = json.load(file)
     model_path = paths.get(model_name, '')
     dataset_path = paths.get(dataset_name, '')
@@ -53,7 +53,7 @@ c4 = load_dataset(dataset_path)
 c4_dataset = c4.map(preprocess_data)
 c4_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
 # c4_dataset
-sample_num = 400
+sample_num = 4000
 top_four_thousand_data = c4_dataset['validation'].select(range(sample_num))
 
 def set_seed(seed):
@@ -78,7 +78,7 @@ def save_datasets(fileid,layerid=1,use_x1=True):
         d = [dx, dx1, dy]
     else:
         d = [dx, dy]
-    torch.save(d, f'{save_path}/{fileid}-{layerid}.pth')
+    torch.save(d, f'{save_path}/{fileid}-{layerid}-more.pth')
     del dx
     if use_x1:
         del dx1
@@ -93,7 +93,7 @@ def save_datasets(fileid,layerid=1,use_x1=True):
 # 计算评估损失
 total_loss = 0.0
 num_batches = 0
-sample_nums = 100
+sample_nums = 500
 layerid = 15
 set_skip_layer_idx(layerid)
 
