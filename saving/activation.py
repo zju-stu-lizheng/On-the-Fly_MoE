@@ -6,7 +6,7 @@ import numpy as np
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 ### from path.json read paths of model and dataset
 model_name = "Llama3-8b"
 dataset_name = "c4"
@@ -93,7 +93,7 @@ def save_datasets(fileid,layerid=1,use_x1=True):
 # 计算评估损失
 total_loss = 0.0
 num_batches = 0
-sample_nums = 500
+sample_nums = 400
 layerid = 15
 set_skip_layer_idx(layerid)
 
@@ -111,7 +111,7 @@ for batch_idx, data in enumerate(tqdm(top_four_thousand_data)):
         num_batches += 1
         if num_batches % sample_nums == 0:
             print(f"[{num_batches}], Eval Loss: {total_loss / (num_batches)}")
-            save_datasets(num_batches // sample_nums, layerid)
+            save_datasets(num_batches // sample_nums, layerid, use_x1=False)
 
 # 计算平均损失
 eval_loss = total_loss / num_batches
