@@ -2,6 +2,6 @@ path.json
 
 ### convert absolute path
 
-
+output/
 runs/
 *.pyc

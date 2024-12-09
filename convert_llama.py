@@ -78,6 +78,18 @@ class GateLayer(nn.Module):
             self.overlap_all.append(mask_indices.numel())
         return true_value
 
+class SimpleLinearModel(nn.Module):
+    def __init__(self,input_dim,output_dim,hidden_dim=32):
+        super(SimpleLinearModel, self).__init__()
+        self.linear1 = nn.Linear(input_dim, hidden_dim,bias=False,dtype=torch.float16)
+        # self.activation = nn.SiLU() # 添加激活函数
+        self.linear2 = nn.Linear(hidden_dim,output_dim,bias=False,dtype=torch.float16)  
+        # init.kaiming_normal_(self.linear1.weight, mode='fan_out', nonlinearity='relu')
+        # init.kaiming_normal_(self.linear2.weight, mode='fan_out', nonlinearity='relu')
+
+    def forward(self, x):
+        # print(x, self.linear1.weight)
+        return self.linear2(self.linear1(x))
 
 class MLPLayer(nn.Module):
     def __init__(self, module, sparsity, num=15, name = None, alpha=0.3, beta=0.3, gamma=0.05, sparsity_ratio=0):
@@ -95,9 +107,15 @@ class MLPLayer(nn.Module):
         self.sparsity = sparsity
 
         #### load the up predictor(wanda pruning)
-        self.helper = torch.load(f'/home/lz/workspace/llama2-7b/moe-offloading/notebooks/output/sparsity/wanda/up_proj_{sparsity_ratio}.pt')
+        # self.helper = torch.load(f'/home/lz/workspace/llama2-7b/moe-offloading/notebooks/output/sparsity/wanda/up_proj_{sparsity_ratio}.pt')
+        if self.num == 15:
+            self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
+            weight = torch.load(f'./output/sparsity/{self.num}.pt',map_location=module.gate_proj.weight.device)
+            # print(weight)
+            self.helper.load_state_dict(weight)
         self.hc_nums = int(gamma * self.intermediate_size)
 
+        self.predict_all = []
         self.overlap_all = []
         self.overlap_clist = []
 
@@ -108,6 +126,7 @@ class MLPLayer(nn.Module):
 
     def coreinfer_recall(self):
         print(f'in decode, layer {self.num}')
+        print(f'Predicted neuron num: {sum(self.predict_all)/len(self.predict_all):.4f}')
         a_overlap_count = sum(self.overlap_clist) / len(self.overlap_clist)
         a_overlap_ratio = sum(self.overlap_clist) / sum(self.overlap_all)
         print(f'Overlap count: {a_overlap_count:.4f}, Overlap ratio: {a_overlap_ratio:.4f}')
@@ -125,6 +144,7 @@ class MLPLayer(nn.Module):
             ### Calculate coverage
             self.overlap_all = []
             self.overlap_clist = []
+            self.predict_all = []
         else:
             ### decode phase
             if self.num == 14:
@@ -133,7 +153,8 @@ class MLPLayer(nn.Module):
             # print(true_value[0][0].shape, self.neuron_num)
             elif self.num == 15:
                 core_mask_index = self.x_topk
-                up_mask_index = torch.topk(pre_x @ self.helper.T, int(self.hc_nums)).indices.flatten()
+                # up_mask_index = torch.topk(pre_x @ self.helper.T, int(self.hc_nums)).indices.flatten()
+                up_mask_index = torch.topk(self.helper(pre_x), int(self.hc_nums)).indices.flatten()
 
                 ## torch取两个index集合的交集
                 # combine_mask_index = core_mask_index[torch.isin(core_mask_index, up_mask_index)]
@@ -143,12 +164,13 @@ class MLPLayer(nn.Module):
                 # 使用 torch.unique 去除重复元素
                 combine_mask_index = torch.unique(combined_set)
 
-                print('The dimension of combine:', combine_mask_index.size(0), f'{combine_mask_index.size(0)/self.intermediate_size:.4f}')
+                # print('The dimension of combine:', combine_mask_index.size(0), f'{combine_mask_index.size(0)/self.intermediate_size:.4f}')
+                self.predict_all.append(combine_mask_index.size(0))
                 mask_indices = torch.topk(true_value, int(self.sparsity * self.intermediate_size)).indices.flatten()
-                print(f"core infer :{torch.isin(mask_indices, core_mask_index).sum().item()/mask_indices.numel():.4f}", )
+                # print(f"core infer :{torch.isin(mask_indices, core_mask_index).sum().item()/mask_indices.numel():.4f}", )
                 overlap_count = torch.isin(mask_indices, combine_mask_index).sum().item()
                 self.overlap_clist.append(overlap_count)
-                self.overlap_all.append(mask_indices.numel())
+                self.overlap_all.append(int(self.sparsity * self.intermediate_size))
 
         down_proj = self.down_proj(true_value)
 
