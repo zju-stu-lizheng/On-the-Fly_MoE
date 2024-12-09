@@ -35,7 +35,7 @@ class MLPLayer(nn.Module):
         # self.helper = torch.load(f'/home/lz/workspace/llama2-7b/moe-offloading/notebooks/output/sparsity/wanda/up_proj_{sparsity_ratio}.pt')
         if self.num == 15:
             self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
-            weight = torch.load(f'./output/sparsity/{self.num}.pt',map_location=module.gate_proj.weight.device)
+            weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.gate_proj.weight.device)
             self.helper.load_state_dict(weight)
         self.hc_nums = int(gamma * self.intermediate_size)
 
@@ -75,10 +75,11 @@ class MLPLayer(nn.Module):
             if self.num == 14:
                 global pre_x
                 pre_x = x
+                # print(x)
             # print(true_value[0][0].shape, self.neuron_num)
             elif self.num == 15:
                 core_mask_index = self.x_topk
-                # up_mask_index = torch.topk(pre_x @ self.helper.T, int(self.hc_nums)).indices.flatten()
+                # print(pre_x)
                 up_mask_index = torch.topk(self.helper(pre_x), self.hc_nums).indices.flatten()
 
                 ## torch取两个index集合的交集
