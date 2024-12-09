@@ -3,81 +3,6 @@ import gc
 import torch 
 import torch.nn as nn
 
-class UpLayer(nn.Module):
-    def __init__(self, weight, sparsity=0.1, num=15, alpha=0.1, beta=0.4, name = None):
-        super(UpLayer, self).__init__()
-        self.weight = weight.clone().cuda()
-        intermediate_size = weight.size(0)
-        # print(intermediate_size, sparsity, intermediate_size * sparsity)
-        self.neuron_num = int(intermediate_size * sparsity)
-        self.tc_nums = int(alpha * intermediate_size)
-        self.sc_nums = int(beta * intermediate_size)
-        self.x_topk = None
-        self.layer_idx = num
-
-    def coreinfer_recall(self):
-        print(f'in decode, up layer {self.layer_idx}')
-        a_overlap_count = sum(self.overlap_clist) / len(self.overlap_clist)
-        a_overlap_ratio = sum(self.overlap_clist) / sum(self.overlap_all)
-        print(f'Overlap count: {a_overlap_count:.4f}, Overlap ratio: {a_overlap_ratio:.4f}')
-
-    def forward(self, x):
-        true_value = x@self.weight.T.cuda()
-        if x.size(1)>1:
-            print('[prefill] in up layer:', self.layer_idx)
-            ### prefill
-            mask_indices = torch.topk(true_value, self.tc_nums).indices.flatten()
-            index_counts = torch.bincount(mask_indices, minlength=true_value.numel())
-            self.x_topk = torch.topk(index_counts, self.sc_nums).indices
-            self.overlap_all = []
-            self.overlap_clist = []
-        else:
-            ### decode 
-            # print(true_value[0][0].shape, self.neuron_num)
-            mask_indices = torch.topk(true_value, self.neuron_num).indices.flatten()
-            overlap_count = torch.isin(mask_indices, self.x_topk).sum().item()
-            self.overlap_clist.append(overlap_count)
-            self.overlap_all.append(mask_indices.numel())
-        return true_value, mask_indices
-
-class GateLayer(nn.Module):
-    def __init__(self, weight, sparsity=0.1, num=15, alpha=0.1, beta=0.4, name = None):
-        super(GateLayer, self).__init__()
-        self.weight = weight.clone().cuda()
-        intermediate_size = weight.size(0)
-        # print(intermediate_size, sparsity, intermediate_size * sparsity)
-        self.neuron_num = int(intermediate_size * sparsity)
-        self.tc_nums = int(alpha * intermediate_size)
-        self.sc_nums = int(beta * intermediate_size)
-        self.x_topk = None
-        self.layer_idx = num
-
-    def coreinfer_recall(self):
-        print(f'in decode, gate layer {self.layer_idx}')
-        a_overlap_count = sum(self.overlap_clist) / len(self.overlap_clist)
-        a_overlap_ratio = sum(self.overlap_clist) / sum(self.overlap_all)
-        print(f'Overlap count: {a_overlap_count:.4f}, Overlap ratio: {a_overlap_ratio:.4f}')
-
-    def forward(self, x):
-        true_value = x@self.weight.T.cuda()
-        if x.size(1)>1:
-            print('[prefill] in gate layer:', self.layer_idx)
-            ### prefill 
-            mask_indices = torch.topk(true_value, self.tc_nums).indices.flatten()
-            index_counts = torch.bincount(mask_indices, minlength=true_value.numel())
-            self.x_topk = torch.topk(index_counts, self.sc_nums).indices
-            ### Calculate coverage
-            self.overlap_all = []
-            self.overlap_clist = []
-        else:
-            ### decode 
-            # print(true_value[0][0].shape, self.neuron_num)
-            mask_indices = torch.topk(true_value, self.neuron_num).indices.flatten()
-            overlap_count = torch.isin(mask_indices, self.x_topk).sum().item()
-            self.overlap_clist.append(overlap_count)
-            self.overlap_all.append(mask_indices.numel())
-        return true_value
-
 class SimpleLinearModel(nn.Module):
     def __init__(self,input_dim,output_dim,hidden_dim=32):
         super(SimpleLinearModel, self).__init__()
@@ -111,7 +36,6 @@ class MLPLayer(nn.Module):
         if self.num == 15:
             self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
             weight = torch.load(f'./output/sparsity/{self.num}.pt',map_location=module.gate_proj.weight.device)
-            # print(weight)
             self.helper.load_state_dict(weight)
         self.hc_nums = int(gamma * self.intermediate_size)
 
@@ -119,32 +43,33 @@ class MLPLayer(nn.Module):
         self.overlap_all = []
         self.overlap_clist = []
 
-        # self.up_proj = UpLayer(module.up_proj.weight, sparsity, num=num, name = name, alpha=alpha, beta=beta)
-        # del module.up_proj
-        # self.gate_proj = GateLayer(module.gate_proj.weight, sparsity, num=num, name = name, alpha=alpha, beta=beta)
-        # del module.gate_proj
+    def clear_list(self):
+        self.predict_all = []
+        self.overlap_all = []
+        self.overlap_clist = []
 
     def coreinfer_recall(self):
         print(f'in decode, layer {self.num}')
-        print(f'Predicted neuron num: {sum(self.predict_all)/len(self.predict_all):.4f}')
+        print(f'Predicted neuron num: {sum(self.predict_all)/len(self.predict_all):.1f}')
         a_overlap_count = sum(self.overlap_clist) / len(self.overlap_clist)
         a_overlap_ratio = sum(self.overlap_clist) / sum(self.overlap_all)
-        print(f'Overlap count: {a_overlap_count:.4f}, Overlap ratio: {a_overlap_ratio:.4f}')
+        print(f'Overlap count: {a_overlap_count:.1f}, Overlap ratio: {a_overlap_ratio:.4f}')
                 
     def forward(self, x):
         true_gate = self.gate_proj(x)
         true_up = self.up_proj(x)
         true_value = self.act_fn(true_gate) * true_up
+        v = torch.abs(true_value)
         ### todo: test for upper bound 
         if x.size(1)>1:
             ### prefill phase
-            mask_indices = torch.topk(true_value, self.tc_nums).indices.flatten()
-            index_counts = torch.bincount(mask_indices, minlength=true_value.numel())
+            mask_indices = torch.topk(v, self.tc_nums).indices.flatten()
+            index_counts = torch.bincount(mask_indices, minlength=v.numel())
             self.x_topk = torch.topk(index_counts, self.sc_nums).indices
             ### Calculate coverage
-            self.overlap_all = []
-            self.overlap_clist = []
-            self.predict_all = []
+            # self.overlap_all = []
+            # self.overlap_clist = []
+            # self.predict_all = []
         else:
             ### decode phase
             if self.num == 14:
@@ -154,7 +79,7 @@ class MLPLayer(nn.Module):
             elif self.num == 15:
                 core_mask_index = self.x_topk
                 # up_mask_index = torch.topk(pre_x @ self.helper.T, int(self.hc_nums)).indices.flatten()
-                up_mask_index = torch.topk(self.helper(pre_x), int(self.hc_nums)).indices.flatten()
+                up_mask_index = torch.topk(self.helper(pre_x), self.hc_nums).indices.flatten()
 
                 ## torch取两个index集合的交集
                 # combine_mask_index = core_mask_index[torch.isin(core_mask_index, up_mask_index)]
@@ -166,7 +91,7 @@ class MLPLayer(nn.Module):
 
                 # print('The dimension of combine:', combine_mask_index.size(0), f'{combine_mask_index.size(0)/self.intermediate_size:.4f}')
                 self.predict_all.append(combine_mask_index.size(0))
-                mask_indices = torch.topk(true_value, int(self.sparsity * self.intermediate_size)).indices.flatten()
+                mask_indices = torch.topk(v, int(self.sparsity * self.intermediate_size)).indices.flatten()
                 # print(f"core infer :{torch.isin(mask_indices, core_mask_index).sum().item()/mask_indices.numel():.4f}", )
                 overlap_count = torch.isin(mask_indices, combine_mask_index).sum().item()
                 self.overlap_clist.append(overlap_count)
