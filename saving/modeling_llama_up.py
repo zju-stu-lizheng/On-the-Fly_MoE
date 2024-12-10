@@ -351,10 +351,10 @@ class LlamaMLP(nn.Module):
                 mask = (v >= th[self.layer_idx][self.expert_idx]).to(x.dtype)
                 #### 动态预测数据采集
                 if profile_sparsity:
-                    # if self.layer_idx == skip_layer_idx - 1:
-                    #     dataset_x.append(x)
-                    # elif self.layer_idx == skip_layer_idx:
-                    if self.layer_idx == skip_layer_idx:
+                    if self.layer_idx == skip_layer_idx - 1:
+                        dataset_x.append(x)
+                    elif self.layer_idx == skip_layer_idx:
+                    # if self.layer_idx == skip_layer_idx:
                         # dataset_x1.append(activation)
                         dataset_y.append(activation*up_result)
                         # dataset_y.append(activation)
@@ -899,8 +899,8 @@ class LlamaDecoderLayer(nn.Module):
 
         hidden_states = self.input_layernorm(hidden_states)
 
-        if self.layer_idx == skip_layer_idx:
-            dataset_x.append(hidden_states)
+        # if self.layer_idx == skip_layer_idx:
+        #     dataset_x.append(hidden_states)
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
