@@ -1,16 +1,14 @@
-# ## 加载保存的激活值
-
 from torch import nn
 import torch.nn.init as init
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-    
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import GradScaler, autocast  
 from torch.utils.data import DataLoader, Dataset, random_split
 import torch.optim as optim
 import torch
 import json
+from tqdm import tqdm
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 with open('path.json', 'r') as file:
     paths = json.load(file)
@@ -76,16 +74,6 @@ class SimpleLinearModel(nn.Module):
         # x= self.activation(x)
         return self.linear2(self.linear1(x))
     
-model=SimpleLinearModel(4096,14336,hidden_dim=1024)
-model.to("cuda")  # 假设使用 GPU
-# criterion = nn.MSELoss().to("cuda")
-criterion = nn.CrossEntropyLoss().to("cuda")
-# criterion = nn.KLDivLoss(reduction='batchmean').to("cuda")
-optimizer = optim.Adam(model.parameters(), lr=5e-4) #lr=5e-5
-writer = SummaryWriter('runs/predictor_sparsity')
-
-from tqdm import tqdm
-
 cnt = 0
 
 def sparse_row(row, keep_ratio=0.1, use_abs = False):
@@ -177,9 +165,19 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, writer, e
 
 
 for layerid in range(22,32):
-    for startid, endid in [(1,4),(4,7),(7,11)]:
+    print(layerid)
+    model=SimpleLinearModel(4096,14336,hidden_dim=1024)
+    model.to("cuda")  # 假设使用 GPU
+    # criterion = nn.MSELoss().to("cuda")
+    criterion = nn.CrossEntropyLoss().to("cuda")
+    # criterion = nn.KLDivLoss(reduction='batchmean').to("cuda")
+    optimizer = optim.Adam(model.parameters(), lr=5e-4) #lr=5e-5
+    writer = SummaryWriter('runs/predictor_sparsity')
+    
+    cnt = 0
+    for startid, endid in [(1,4),(4,7),(7,10)]:
         dataset = CustomDataset(layerid, startid=startid, endid=endid)
-        print(len(dataset), dataset[0][0].shape, dataset[0][1].shape) # torch.Size([512, 4096])
+        print(len(dataset)) # torch.Size([512, 4096])
         # 划分训练集和验证集
         train_size = int(0.9 * len(dataset))
         val_size = len(dataset) - train_size
@@ -187,4 +185,4 @@ for layerid in range(22,32):
         train_loader = DataLoader(train_dataset, batch_size=1024, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=1024, shuffle=False)
 
-        train_model(model, train_loader, val_loader, criterion, optimizer, writer=writer, epochs=4, layerid=15)
+        train_model(model, train_loader, val_loader, criterion, optimizer, writer=writer, epochs=4, layerid=layerid)
