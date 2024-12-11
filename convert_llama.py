@@ -123,7 +123,7 @@ class MLPLayer(nn.Module):
 
         return down_value
 
-def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1, alpha=0.3, beta=0.3, gamma=0.05, sparsity_ratio=0):
+def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1, alpha=0.2, beta=0.1, gamma=0.3, sparsity_ratio=0):
     from tqdm import tqdm
     for name, module in tqdm(model.named_modules(), desc="Convert Llama Models"):
         if "mlp" in name and name.count('.') == 3:
