@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 ### from path.json read paths of model and dataset
 model_name = "Llama3-8b"
 dataset_name = "c4"
@@ -115,5 +115,5 @@ def run_c4(c4data, model, layerid = 15, sample_nums = 400):
 set_seed(42)
 c4data = get_c4_data(sample_num = 4000)
 model = get_model(model_path)
-for layerid in range(22, 32):
+for layerid in range(1, 22):
     run_c4(c4data, model, layerid=layerid)

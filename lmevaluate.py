@@ -40,15 +40,18 @@ def evaluate(task_name_list, model, tokenizer, num_fewshot, device):
     print(results['results'])
 
 
-def main(task_name_list, model_name, sparsity, start_num, end_num, token_sparsity, is_sparsity, device, num_fewshot,):
+def main(task_name_list, model_name, sparsity, start_num, end_num, token_sparsity, is_sparsity, device, num_fewshot, gamma=0.3):
     model, tokenizer = _load_model(model_name)
     
     if is_sparsity == True:
-        model = convert_llama_model(model, sparsity, start_num, end_num, token_sparsity, use_core=False)
+        model = convert_llama_model(model, sparsity, start_num, end_num, token_sparsity, gamma=gamma, use_core=False)
 
     evaluate(task_name_list, model, tokenizer, num_fewshot, device)
 
 # triviaqa
 task_list=['boolq','sciq','openbookqa','winogrande','arc_challenge','arc_easy']
+num_fewshot = 0
+predictor_ratio = 0.5
+
 # task_list=['truthfulqa_gen','boolq']
-main(task_name_list=task_list, model_name="Llama3-8b", sparsity=0.1, start_num=21, end_num=32, token_sparsity=0.1, is_sparsity=False, device='cuda', num_fewshot=0)
+main(task_name_list=task_list, model_name="Llama3-8b", sparsity=0.1, start_num=21, end_num=32, token_sparsity=0.1, is_sparsity=True, device='cuda', num_fewshot=num_fewshot, gamma=predictor_ratio)

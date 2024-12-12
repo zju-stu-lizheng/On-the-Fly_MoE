@@ -1,10 +1,16 @@
-#### PD结合的思路去转换llama的模型
+#### convert llama model for sparsity
 import gc
 import torch 
 import torch.nn as nn
 
 class SimpleLinearModel(nn.Module):
-    def __init__(self,input_dim,output_dim,hidden_dim=32):
+    """
+    sparsity prediction model：
+    input_dim: 4096
+    output_dim: 14336
+    lora hidden_dim: 1024
+    """
+    def __init__(self,input_dim,output_dim,hidden_dim=1024):
         super(SimpleLinearModel, self).__init__()
         self.linear1 = nn.Linear(input_dim, hidden_dim,bias=False,dtype=torch.float16)
         self.linear2 = nn.Linear(hidden_dim,output_dim,bias=False,dtype=torch.float16)  
@@ -14,6 +20,9 @@ class SimpleLinearModel(nn.Module):
 
 
 class Linearlayer(nn.Module):
+    """
+    sparse linear layer
+    """
     def __init__(self, weight, sparsity=0.1, num=15, name = None):
         super(Linearlayer, self).__init__()
         self.weight = weight.clone().cuda()
@@ -32,14 +41,13 @@ class Linearlayer(nn.Module):
             
         return true_value
 
-class Newlayer(nn.Module):
+class Newlayer(Linearlayer):
+    """
+    sparse linear layer(only decode phase):
+    in the prefill phase, the whole weight is used
+    """
     def __init__(self, weight, sparsity=0.1, num=15, name = None):
-        super(Newlayer, self).__init__()
-        self.weight = weight.clone().cuda()
-        intermediate_size = weight.size(0)
-        neuron_num = int(intermediate_size * sparsity)
-        self.filtered_W = torch.zeros((neuron_num, weight.size(1))).to(torch.float16).cuda()
-        self.layer_idx = num
+        super(Newlayer, self).__init__(weight, sparsity, num, name)
 
     def forward(self, x, indices=None):
         if x.size(1) > 1:
@@ -56,11 +64,40 @@ class Newlayer(nn.Module):
             
         return true_value
     
-class MLP_Core(nn.Module):
-    def __init__(self, module, sparsity, num=15, name = None, alpha=0.3, beta=0.3, gamma=0.05):
+class BaseMLPLayer(nn.Module):
+    """
+    Base class for mlp layers with common methods
+    """
+    def __init__(self, num=15):
         super().__init__()
-        self.act_fn = module.act_fn
         self.num = num
+        self.predict_all = []
+        self.overlap_all = []
+        self.overlap_clist = []
+
+    def clear_list(self):
+        self.predict_all = []
+        self.overlap_all = []
+        self.overlap_clist = []
+
+    def coreinfer_recall(self):
+        print(f'in decode, layer {self.num}')
+        try:
+            print(f'Predicted neuron num: {sum(self.predict_all)/len(self.predict_all):.1f}')
+        except:
+            print('No data')
+        a_overlap_count = sum(self.overlap_clist) / len(self.overlap_clist)
+        a_overlap_ratio = sum(self.overlap_clist) / sum(self.overlap_all)
+        print(f'Overlap count: {a_overlap_count:.1f}, Overlap ratio: {a_overlap_ratio:.4f}')
+
+class MLP_Core(BaseMLPLayer):
+    """
+    mlp layer with coreinfer
+    in prefill phase, the whole weight is used and profile the mask index
+    """
+    def __init__(self, module, sparsity, num=15, name = None, alpha=0.3, beta=0.3, gamma=0.05):
+        super().__init__(num)
+        self.act_fn = module.act_fn
         self.intermediate_size = module.up_proj.weight.size(0)  # 14336
         self.hidden_size = module.up_proj.weight.size(1)        # 4096
         self.tc_nums = int(alpha * self.intermediate_size)
@@ -81,28 +118,9 @@ class MLP_Core(nn.Module):
             weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.down_proj.weight.device)
             self.helper.load_state_dict(weight)
 
-        self.predict_all = []
-        self.overlap_all = []
-        self.overlap_clist = []
-
         del module.gate_proj
         del module.up_proj
 
-    def clear_list(self):
-        self.predict_all = []
-        self.overlap_all = []
-        self.overlap_clist = []
-
-    def coreinfer_recall(self):
-        print(f'in decode, layer {self.num}')
-        try:
-            print(f'Predicted neuron num: {sum(self.predict_all)/len(self.predict_all):.1f}')
-        except:
-            print('No data')
-        a_overlap_count = sum(self.overlap_clist) / len(self.overlap_clist)
-        a_overlap_ratio = sum(self.overlap_clist) / sum(self.overlap_all)
-        print(f'Overlap count: {a_overlap_count:.1f}, Overlap ratio: {a_overlap_ratio:.4f}')
-                
     def forward(self, x):
         ### todo: end-to-end inference
         if x.size(1)>1:
@@ -142,11 +160,13 @@ class MLP_Core(nn.Module):
 
         return down_value
     
-class MLPLayer(nn.Module):
+class MLPLayer(BaseMLPLayer):
+    """
+    mlp layer without coreinfer
+    """
     def __init__(self, module, sparsity, num=15, name = None, gamma=0.05):
-        super().__init__()
+        super().__init__(num)
         self.act_fn = module.act_fn
-        self.num = num
         self.intermediate_size = module.up_proj.weight.size(0)  # 14336
         self.hidden_size = module.up_proj.weight.size(1)        # 4096
         self.sparsity = sparsity
@@ -164,37 +184,18 @@ class MLPLayer(nn.Module):
             weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.down_proj.weight.device)
             self.helper.load_state_dict(weight)
 
-        self.predict_all = []
-        self.overlap_all = []
-        self.overlap_clist = []
-
         del module.gate_proj
         del module.up_proj
-
-    def coreinfer_recall(self):
-        print(f'in decode, layer {self.num}')
-        try:
-            print(f'Predicted neuron num: {sum(self.predict_all)/len(self.predict_all):.1f}')
-        except:
-            print('No data')
-        a_overlap_count = sum(self.overlap_clist) / len(self.overlap_clist)
-        a_overlap_ratio = sum(self.overlap_clist) / sum(self.overlap_all)
-        print(f'Overlap count: {a_overlap_count:.1f}, Overlap ratio: {a_overlap_ratio:.4f}')
-
-    def clear_list(self):
-        self.predict_all = []
-        self.overlap_all = []
-        self.overlap_clist = []
                 
     def forward(self, x):
         if self.num > 20:
             global pre_x
             pre_x = x
         if self.num > 21:
-            ### 这里应该选最后一个token的topk
+            ### the final token activation for topk-selection
             up_mask_index = torch.topk(self.helper(pre_x)[:,-1,:], self.hc_nums).indices.flatten()  # torch.Size([1, 300, 4300])
             # print(up_mask_index.size())
-            ### 根据up_mask_index进行稀疏
+            ### sparsity for up_mask_index
             true_value = self.act_fn(self.gate_proj(x, up_mask_index)) * self.up_proj(x, up_mask_index)            
             self.filtered_W_down = self.down_proj.weight[:,up_mask_index]
             down_value = true_value @ self.filtered_W_down.T
