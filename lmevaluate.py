@@ -44,11 +44,11 @@ def main(task_name_list, model_name, sparsity, start_num, end_num, token_sparsit
     model, tokenizer = _load_model(model_name)
     
     if is_sparsity == True:
-        model = convert_llama_model(model, sparsity, start_num, end_num, token_sparsity,)
+        model = convert_llama_model(model, sparsity, start_num, end_num, token_sparsity, use_core=False)
 
     evaluate(task_name_list, model, tokenizer, num_fewshot, device)
 
 # triviaqa
-# task_list=['boolq','sciq','openbookqa','winogrande','arc_challenge','arc_easy']
-task_list=['truthfulqa_gen','boolq']
+task_list=['boolq','sciq','openbookqa','winogrande','arc_challenge','arc_easy']
+# task_list=['truthfulqa_gen','boolq']
 main(task_name_list=task_list, model_name="Llama3-8b", sparsity=0.1, start_num=21, end_num=32, token_sparsity=0.1, is_sparsity=False, device='cuda', num_fewshot=0)

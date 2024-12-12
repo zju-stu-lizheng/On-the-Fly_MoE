@@ -13,6 +13,25 @@ class SimpleLinearModel(nn.Module):
         return self.linear2(self.linear1(x))
 
 
+class Linearlayer(nn.Module):
+    def __init__(self, weight, sparsity=0.1, num=15, name = None):
+        super(Linearlayer, self).__init__()
+        self.weight = weight.clone().cuda()
+        intermediate_size = weight.size(0)
+        neuron_num = int(intermediate_size * sparsity)
+        self.filtered_W = torch.zeros((neuron_num, weight.size(1))).to(torch.float16).cuda()
+        self.layer_idx = num
+
+    def forward(self, x, indices=None):
+        if indices != None:
+            self.filtered_W = self.weight[indices,:]
+            # print(self.filtered_W.shape)
+            true_value = x@self.filtered_W.T
+        else:
+            true_value = x@self.weight.T
+            
+        return true_value
+
 class Newlayer(nn.Module):
     def __init__(self, weight, sparsity=0.1, num=15, name = None):
         super(Newlayer, self).__init__()
@@ -37,8 +56,8 @@ class Newlayer(nn.Module):
             
         return true_value
     
-class MLPLayer(nn.Module):
-    def __init__(self, module, sparsity, num=15, name = None, alpha=0.3, beta=0.3, gamma=0.05, sparsity_ratio=0):
+class MLP_Core(nn.Module):
+    def __init__(self, module, sparsity, num=15, name = None, alpha=0.3, beta=0.3, gamma=0.05):
         super().__init__()
         self.act_fn = module.act_fn
         self.num = num
@@ -122,8 +141,78 @@ class MLPLayer(nn.Module):
                 down_value = self.down_proj(true_value)
 
         return down_value
+    
+class MLPLayer(nn.Module):
+    def __init__(self, module, sparsity, num=15, name = None, gamma=0.05):
+        super().__init__()
+        self.act_fn = module.act_fn
+        self.num = num
+        self.intermediate_size = module.up_proj.weight.size(0)  # 14336
+        self.hidden_size = module.up_proj.weight.size(1)        # 4096
+        self.sparsity = sparsity
+        self.hc_nums = int(gamma * self.intermediate_size)
+        neuron_num = int(self.intermediate_size * sparsity)
 
-def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1, alpha=0.2, beta=0.1, gamma=0.3, sparsity_ratio=0):
+        ### new layer converted from nn.linear
+        self.gate_proj = Linearlayer(module.gate_proj.weight, sparsity=sparsity, num=num, )
+        self.up_proj = Linearlayer(module.up_proj.weight, sparsity=sparsity, num=num, )
+        self.down_proj = module.down_proj
+        self.filtered_W_down = torch.zeros((self.hidden_size, neuron_num)).to(torch.float16).cuda()
+
+        if self.num > 21:
+            self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
+            weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.down_proj.weight.device)
+            self.helper.load_state_dict(weight)
+
+        self.predict_all = []
+        self.overlap_all = []
+        self.overlap_clist = []
+
+        del module.gate_proj
+        del module.up_proj
+
+    def coreinfer_recall(self):
+        print(f'in decode, layer {self.num}')
+        try:
+            print(f'Predicted neuron num: {sum(self.predict_all)/len(self.predict_all):.1f}')
+        except:
+            print('No data')
+        a_overlap_count = sum(self.overlap_clist) / len(self.overlap_clist)
+        a_overlap_ratio = sum(self.overlap_clist) / sum(self.overlap_all)
+        print(f'Overlap count: {a_overlap_count:.1f}, Overlap ratio: {a_overlap_ratio:.4f}')
+
+    def clear_list(self):
+        self.predict_all = []
+        self.overlap_all = []
+        self.overlap_clist = []
+                
+    def forward(self, x):
+        if self.num > 20:
+            global pre_x
+            pre_x = x
+        if self.num > 21:
+            ### 这里应该选最后一个token的topk
+            up_mask_index = torch.topk(self.helper(pre_x)[:,-1,:], self.hc_nums).indices.flatten()  # torch.Size([1, 300, 4300])
+            # print(up_mask_index.size())
+            ### 根据up_mask_index进行稀疏
+            true_value = self.act_fn(self.gate_proj(x, up_mask_index)) * self.up_proj(x, up_mask_index)            
+            self.filtered_W_down = self.down_proj.weight[:,up_mask_index]
+            down_value = true_value @ self.filtered_W_down.T
+
+            v = torch.abs(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+            ### calculate recall
+            self.predict_all.append(up_mask_index.size(0))
+            mask_indices = torch.topk(v[:,-1,:], int(self.sparsity * self.intermediate_size)).indices.flatten()
+            overlap_count = torch.isin(mask_indices, up_mask_index).sum().item()
+            self.overlap_clist.append(overlap_count)
+            self.overlap_all.append(int(self.sparsity * self.intermediate_size))
+        else:
+            true_value = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+            down_value = self.down_proj(true_value)
+
+        return down_value
+
+def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1, alpha=0.2, beta=0.1, gamma=0.3, sparsity_ratio=0, use_core=True):
     from tqdm import tqdm
     for name, module in tqdm(model.named_modules(), desc="Convert Llama Models"):
         if "mlp" in name and name.count('.') == 3:
@@ -136,7 +225,11 @@ def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1,
                     parent = dict(model.named_modules())[parent_name]
                 else:
                     parent = model # for lm_head
-                NewLayer = MLPLayer(module, sparsity, num=num, name = name, alpha=alpha, beta=beta, gamma=gamma, sparsity_ratio=sparsity_ratio)
+                if use_core:
+                    print(f"Converting Layer {name} with CoreInfer")
+                    NewLayer = MLP_Core(module, sparsity, num=num, name = name, alpha=alpha, beta=beta, gamma=gamma, )
+                else:
+                    NewLayer = MLPLayer(module, sparsity, num=num, name = name, gamma=gamma)
                 setattr(parent, attr_name, NewLayer)
                 del module
     
