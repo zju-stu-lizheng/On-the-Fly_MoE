@@ -55,7 +55,7 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 # if is_flash_attn_2_available():
 #     from flash_attn import flash_attn_func, flash_attn_varlen_func
 #     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
-profile_mode = False
+profile_mode = True
 profile_x_pos = False
 import csv
 # 读取CSV文件
@@ -326,7 +326,8 @@ class LlamaMLP(nn.Module):
                 ## 统计分布
                 global x_all
                 global x_small
-                current_hidden_states = activation * self.up_proj(x)
+                up_result = self.up_proj(x)
+                current_hidden_states = activation * up_result
                 v = torch.abs(current_hidden_states)
                 if profile_x_pos:
                     global x_pos
@@ -341,9 +342,9 @@ class LlamaMLP(nn.Module):
                         print(attention_mask.shape, v.shape)
                         v = v * attention_mask.unsqueeze(-1)
                     
-                    x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
+                    x_all[self.layer_idx][self.expert_idx] += torch.numel(up_result)
                     for i in range(step):
-                        x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (1.0/step)*(i+1) ).item()
+                        x_small[self.layer_idx][self.expert_idx][i] += torch.sum( up_result < (1.0/step)*(i+1) ).item()
                 
             else:
                 up_result = self.up_proj(x)

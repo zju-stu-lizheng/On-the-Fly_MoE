@@ -1,12 +1,8 @@
-import functools
 import torch
 import json
-from modeling_llama_up import LlamaForCausalLM, set_th_sparsity, dataset_x, dataset_y, dataset_x1, set_skip_layer_idx
+from modeling_llama_up import dataset_x, dataset_y, dataset_x1, set_skip_layer_idx
 import os
-import numpy as np
-from datasets import load_dataset
-from transformers import AutoTokenizer
-from torch.utils.data import DataLoader
+from utils import get_c4_data, get_model, set_seed
 from tqdm import tqdm
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -19,47 +15,6 @@ with open('../path.json', 'r') as file:
     model_path = paths.get(model_name, '')
     dataset_path = paths.get(dataset_name, '')
     save_path = paths.get('gatemulup_path','')
-
-def get_model(model_path):
-    model = LlamaForCausalLM.from_pretrained(
-        model_path,
-        device_map='auto',
-        use_cache=False,
-        torch_dtype=torch.float16,
-    )
-    sparsity=0
-    set_th_sparsity(sparsity)
-    print(f'with sparsity of {sparsity}')
-    return model
-
-def preprocess_data(batch, tokenizer):
-    # 使用 tokenizer 将文本数据转换为模型输入
-    # inputs = tokenizer(batch['text'], padding="max_length", truncation=True, max_length=100, return_tensors="pt")
-    inputs = tokenizer(batch['text'], padding=False, truncation=True, max_length=MAX_LENGTH, return_tensors="pt")
-    inputs["labels"] = inputs.input_ids.clone()
-    return inputs
-
-def get_c4_data(sample_num = 4000):
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    tokenizer.padding_side = "right"
-    # # 加载 C4 数据集的验证集
-    c4 = load_dataset(dataset_path)
-    # 对数据集进行预处理
-    c4_dataset = c4.map(
-        functools.partial(
-        preprocess_data,
-        tokenizer=tokenizer
-    ))
-    c4_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
-    
-    top_four_thousand_data = c4_dataset['validation'].select(range(sample_num))
-    return top_four_thousand_data
-
-def set_seed(seed):
-    np.random.seed(seed)
-    torch.manual_seed(seed)
 
 def save_datasets(fileid,layerid=1,use_x1=True):
     print(dataset_x[0].shape)
@@ -113,7 +68,7 @@ def run_c4(c4data, model, layerid = 15, sample_nums = 400):
     print(f"Eval Loss: {eval_loss}")
 
 set_seed(42)
-c4data = get_c4_data(sample_num = 4000)
+c4data = get_c4_data(model_path, dataset_path, sample_num = 4000)
 model = get_model(model_path)
-for layerid in range(1, 22):
+for layerid in range(18, 22):
     run_c4(c4data, model, layerid=layerid)
