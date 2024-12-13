@@ -113,7 +113,7 @@ class MLP_Core(BaseMLPLayer):
         self.down_proj = module.down_proj
         self.filtered_W_down = torch.zeros((self.hidden_size, neuron_num)).to(torch.float16).cuda()
 
-        if self.num > 21:
+        if self.num > 0:
             self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
             weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.down_proj.weight.device)
             self.helper.load_state_dict(weight)
@@ -134,10 +134,9 @@ class MLP_Core(BaseMLPLayer):
             self.x_topk = torch.topk(index_counts, self.sc_nums).indices
         else:
             ### decode phase
-            if self.num > 20:
-                global pre_x
-                pre_x = x
-            if self.num > 21:
+            global pre_x
+            pre_x = x
+            if self.num > 0:
                 core_mask_index = self.x_topk
                 up_mask_index = torch.topk(self.helper(pre_x), self.hc_nums).indices.flatten()
                 combined_set = torch.cat((core_mask_index, up_mask_index))
@@ -179,7 +178,7 @@ class MLPLayer(BaseMLPLayer):
         self.down_proj = module.down_proj
         self.filtered_W_down = torch.zeros((self.hidden_size, neuron_num)).to(torch.float16).cuda()
 
-        if self.num > 21:
+        if self.num > 0:
             self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
             weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.down_proj.weight.device)
             self.helper.load_state_dict(weight)
@@ -188,10 +187,9 @@ class MLPLayer(BaseMLPLayer):
         del module.up_proj
                 
     def forward(self, x):
-        if self.num > 20:
-            global pre_x
-            pre_x = x
-        if self.num > 21:
+        global pre_x
+        pre_x = x
+        if self.num > 0:
             ### the final token activation for topk-selection
             up_mask_index = torch.topk(self.helper(pre_x)[:,-1,:], self.hc_nums).indices.flatten()  # torch.Size([1, 300, 4300])
             # print(up_mask_index.size())
