@@ -24,7 +24,7 @@ def get_model(model_path):
             model_path,
             device_map='auto',
             use_cache=False,
-            torch_dtype='float16',
+            torch_dtype=torch.bfloat16,
             # attn_implementation="flash_attention_2"
         )
         modeling_mixtral_up.set_th_sparsity(sparsity)

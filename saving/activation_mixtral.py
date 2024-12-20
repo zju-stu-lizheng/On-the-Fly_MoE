@@ -1,11 +1,12 @@
 import torch
 import json
-from modeling_llama_up import dataset_x, dataset_y, set_skip_layer_idx
+from modeling_mixtral_up import dataset_x, dataset_y, set_skip_layer_idx
 import os
 from utils import get_c4_data, get_model, set_seed
 from tqdm import tqdm
+# import argparser
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 ### from path.json read paths of model and dataset
 model_name = "mixtral"
 dataset_name = "c4"
@@ -19,8 +20,9 @@ with open('../path.json', 'r') as file:
 def save_datasets(fileid,layerid=1,use_x1=False):
     for i in range(8):
         # print(i)
-        dx = torch.cat(dataset_x[i],dim=1)
-        dy = torch.cat(dataset_y[i],dim=1)
+        # print(dataset_x[i])
+        dx = torch.cat(dataset_x[i])
+        dy = torch.cat(dataset_y[i])
         dataset_x[i].clear()
         dataset_y[i].clear()
         torch.cuda.empty_cache()
@@ -61,7 +63,7 @@ def run_c4(c4data, model, layerid = 15, sample_nums = 400):
     print(f"Eval Loss: {eval_loss}")
 
 set_seed(42)
-c4data = get_c4_data(model_path, dataset_path, sample_num = 10000)
+c4data = get_c4_data(model_path, dataset_path, sample_num = 8000)
 model = get_model(model_path)
-for layerid in range(15):
+for layerid in range(16,32):
     run_c4(c4data, model, layerid=layerid, sample_nums=1000)

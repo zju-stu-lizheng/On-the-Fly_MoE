@@ -793,9 +793,11 @@ class MixtralBLockSparseTop2MLP(nn.Module):
         else:
             mask = (v >= th[self.layer_idx][self.expert_idx]).to(hidden_states.dtype)
             #### 动态预测数据采集
-            if profile_sparsity and self.layer_idx == skip_layer_idx:
-                dataset_x[self.expert_idx].append(preatt_score)
-                dataset_y[self.expert_idx].append(activation)
+            if profile_sparsity:
+                if self.layer_idx == skip_layer_idx - 1:
+                    dataset_x[self.expert_idx].append(hidden_states)
+                elif self.layer_idx == skip_layer_idx:
+                    dataset_y[self.expert_idx].append(activation)
             current_hidden_states = torch.mul(self.w3(hidden_states), mask) * torch.mul(activation, mask)
         current_hidden_states = self.w2(current_hidden_states)
         return routing_weights * current_hidden_states
@@ -819,7 +821,7 @@ class MixtralSparseMoeBlock(nn.Module):
     and memory on padding.
     """
 
-    def __init__(self, config, layer_idx: int=0):
+    def __init__(self, config, layer_idx: int):
         super().__init__()
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.intermediate_size
@@ -831,7 +833,7 @@ class MixtralSparseMoeBlock(nn.Module):
         # gating
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
 
-        self.experts = nn.ModuleList([MixtralBLockSparseTop2MLP(config, self.layer_idx, i) for i in range(self.num_experts)])
+        self.experts = nn.ModuleList([MixtralBLockSparseTop2MLP(config, layer_idx, i) for i in range(self.num_experts)])
 
     def forward(self, hidden_states: torch.Tensor, preatt_score: Optional[torch.Tensor] = None, use_pre = False) -> torch.Tensor:
         """ """
