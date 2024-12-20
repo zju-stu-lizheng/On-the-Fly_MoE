@@ -1,6 +1,8 @@
 import functools
 import torch
 from modeling_llama_up import LlamaForCausalLM, set_th_sparsity
+from modeling_mixtral_up import MixtralForCausalLM
+import modeling_mixtral_up
 import numpy as np
 from datasets import load_dataset
 from transformers import AutoTokenizer
@@ -8,14 +10,25 @@ from transformers import AutoTokenizer
 MAX_LENGTH = 512
 
 def get_model(model_path):
-    model = LlamaForCausalLM.from_pretrained(
-        model_path,
-        device_map='auto',
-        use_cache=False,
-        torch_dtype=torch.float16,
-    )
     sparsity=0
-    set_th_sparsity(sparsity)
+    if 'Llama' in model_path:
+        model = LlamaForCausalLM.from_pretrained(
+            model_path,
+            device_map='auto',
+            use_cache=False,
+            torch_dtype=torch.float16,
+        )
+        set_th_sparsity(sparsity)
+    else:
+        model = MixtralForCausalLM.from_pretrained(
+            model_path,
+            device_map='auto',
+            use_cache=False,
+            torch_dtype='float16',
+            # attn_implementation="flash_attention_2"
+        )
+        modeling_mixtral_up.set_th_sparsity(sparsity)
+    
     print(f'with sparsity of {sparsity}')
     return model
 

@@ -1,11 +1,11 @@
 import torch
 import json
-from modeling_llama_up import dataset_x, dataset_y, dataset_x1, set_skip_layer_idx
+from modeling_llama_up import dataset_x, dataset_y, set_skip_layer_idx
 import os
 from utils import get_c4_data, get_model, set_seed
 from tqdm import tqdm
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 ### from path.json read paths of model and dataset
 model_name = "mixtral"
 dataset_name = "c4"
@@ -16,26 +16,19 @@ with open('../path.json', 'r') as file:
     dataset_path = paths.get(dataset_name, '')
     save_path = paths.get('gatemulup_path','')
 
-def save_datasets(fileid,layerid=1,use_x1=True):
-    print(dataset_x[0].shape)
-    dx = torch.cat(dataset_x,dim=1)
-    dataset_x.clear()
-    dy = torch.cat(dataset_y,dim=1)
-    dataset_y.clear()
-    torch.cuda.empty_cache()
-    if use_x1:
-        dx1 = torch.cat(dataset_x1,dim=1)
-        dataset_x1.clear()
+def save_datasets(fileid,layerid=1,use_x1=False):
+    for i in range(8):
+        # print(i)
+        dx = torch.cat(dataset_x[i],dim=1)
+        dy = torch.cat(dataset_y[i],dim=1)
+        dataset_x[i].clear()
+        dataset_y[i].clear()
         torch.cuda.empty_cache()
-        d = [dx, dx1, dy]
-    else:
         d = [dx, dy]
-    torch.save(d, f'{save_path}/{fileid}-{layerid}-mixtral.pth')
-    del dx
-    if use_x1:
-        del dx1
-    del dy
-    torch.cuda.empty_cache()
+        # if not (i != 2 and i != 5):
+        torch.save(d, f'{save_path}/{fileid}-{layerid}-mixtral-{i}.pth')
+        del dx
+        del dy
 
 # 定义数据加载器
 # batch_size = 1
@@ -68,7 +61,7 @@ def run_c4(c4data, model, layerid = 15, sample_nums = 400):
     print(f"Eval Loss: {eval_loss}")
 
 set_seed(42)
-c4data = get_c4_data(model_path, dataset_path, sample_num = 4000)
+c4data = get_c4_data(model_path, dataset_path, sample_num = 10000)
 model = get_model(model_path)
 for layerid in range(15):
-    run_c4(c4data, model, layerid=layerid)
+    run_c4(c4data, model, layerid=layerid, sample_nums=1000)
