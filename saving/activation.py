@@ -1,11 +1,11 @@
 import torch
 import json
-from modeling_llama_up import dataset_x, dataset_y, dataset_x1, set_skip_layer_idx
+from modeling_llama_up import dataset_x, dataset_y, dataset_x1, set_skip_layer_idx, set_profile_mode
 import os
 from utils import get_c4_data, get_model, set_seed
 from tqdm import tqdm
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 ### from path.json read paths of model and dataset
 model_name = "Llama3-8b"
 dataset_name = "c4"
@@ -14,7 +14,8 @@ with open('../path.json', 'r') as file:
     paths = json.load(file)
     model_path = paths.get(model_name, '')
     dataset_path = paths.get(dataset_name, '')
-    save_path = paths.get('gatemulup_path','')
+    save_path = paths.get('gate_path','')
+    ### gate_path: (i-1)-th layer x and i-th layer silu(gate)
 
 def save_datasets(fileid,layerid=1,use_x1=True):
     print(dataset_x[0].shape)
@@ -68,7 +69,8 @@ def run_c4(c4data, model, layerid = 15, sample_nums = 400):
     print(f"Eval Loss: {eval_loss}")
 
 set_seed(42)
-c4data = get_c4_data(model_path, dataset_path, sample_num = 4000)
+set_profile_mode(False) ### not to profile threshold
+c4data = get_c4_data(model_path, dataset_path, sample_num = 400)
 model = get_model(model_path)
-for layerid in range(18, 22):
+for layerid in range(15, 17):
     run_c4(c4data, model, layerid=layerid)
