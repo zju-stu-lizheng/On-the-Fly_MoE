@@ -55,7 +55,7 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 # if is_flash_attn_2_available():
 #     from flash_attn import flash_attn_func, flash_attn_varlen_func
 #     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
-profile_mode = True
+profile_mode = False
 profile_x_pos = False
 import csv
 # 读取CSV文件
@@ -68,6 +68,11 @@ def read_csv_to_2d_list(filename):
             float_row = [float(value) for value in row]
             data_2d_list.append(float_row)
     return data_2d_list
+
+def set_profile_mode(mode):
+    global profile_mode
+    profile_mode = mode
+    print(f'profile mode is {profile_mode}')
 
 th = None
 # 设置间隔 400
@@ -357,7 +362,7 @@ class LlamaMLP(nn.Module):
                     elif self.layer_idx == skip_layer_idx:
                     # if self.layer_idx == skip_layer_idx:
                         # dataset_x1.append(activation)
-                        dataset_y.append(activation*up_result)
+                        dataset_y.append(activation)
                         # dataset_y.append(activation)
                     # elif self.layer_idx == skip_layer_idx + 1:
                     #     # dataset_x.append(x)
