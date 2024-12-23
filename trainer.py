@@ -8,22 +8,46 @@ import torch.optim as optim
 import torch
 import json
 from tqdm import tqdm
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 
 with open('path.json', 'r') as file:
     paths = json.load(file)
     save_path = paths.get('gatemulup_path','')
 
 class CustomDataset(Dataset):
-    def __init__(self, layerid = 1, expertid = 0, startid=1, endid=4, use_x1 =False):
+    def __init__(self, layerid = 1, expertid = 0, startid=1, endid=4, use_x1=False, isMixtral=True):
         # 加载数据self.data_x1,
         self.use_x1 = use_x1
-        if use_x1:
-            self.data_x, self.data_x1, self.data_y = self.load_datasets(layerid,startid=startid,endid=endid,use_x1=use_x1)
-            print(len(self.data_x1),len(self.data_x),len(self.data_y))
+        if isMixtral:
+            if use_x1:
+                self.data_x, self.data_x1, self.data_y = self.load_mixtral_datasets(layerid,expertid,startid=startid,endid=endid)
+                print(len(self.data_x1),len(self.data_x),len(self.data_y))
+            else:
+                self.data_x, self.data_y = self.load_mixtral_datasets(layerid,expertid,startid=startid,endid=endid)
+                print(len(self.data_x),len(self.data_y))
         else:
-            self.data_x, self.data_y = self.load_datasets(layerid,startid=startid,endid=endid,use_x1=use_x1)
-            print(len(self.data_x),len(self.data_y))
+            if use_x1:
+                self.data_x, self.data_x1, self.data_y = self.load_datasets(layerid,startid=startid,endid=endid,use_x1=use_x1)
+                print(len(self.data_x1),len(self.data_x),len(self.data_y))
+            else:
+                self.data_x, self.data_y = self.load_datasets(layerid,startid=startid,endid=endid,use_x1=use_x1)
+                print(len(self.data_x),len(self.data_y))
+
+    def load_mixtral_datasets(self, layerid = 1, expertid = 0, startid=1, endid=4):   
+        datasets_x = []
+        datasets_y = []
+        for fileid in range(startid, endid):
+            # 加一个map_location
+            d = torch.load(f'{save_path}/{fileid}-{layerid}-mixtral-{expertid}.pth', map_location=lambda storage, loc: storage.cuda(0))
+            datasets_x.append(d[0])
+            datasets_y.append(d[-1])
+            print("fileid:",fileid, datasets_x[-1].shape, datasets_y[-1].shape)
+        x,y = torch.cat(datasets_x), torch.cat(datasets_y)
+        datasets_x.clear()
+        datasets_y.clear()
+        x = x.reshape(-1, 4096)
+        y = y.reshape(-1, 14336)
+        return x,y
 
     def load_datasets(self, layerid = 1, expertid = 0, startid=1, endid=4, use_x1 = False):   
         datasets_x = []
@@ -84,7 +108,6 @@ def sparse_row(row, keep_ratio=0.1, use_abs = False):
     if use_abs:
         row = torch.abs(row)
     topk_indices = torch.topk(row, num_to_keep).indices
-    # topk_indices = torch.topk(row, num_to_keep).indices
     
     # 创建一个与 row 相同大小的零张量
     sparse_row = torch.zeros_like(row)
@@ -113,7 +136,7 @@ def test_model(model, val_loader, sparsity=0.1):
                 outputs = model(inputs)
 
             preds = generate_label(outputs, sparsity)
-            truth = generate_label(targets, 0.1, use_abs = True)
+            truth = generate_label(targets, 0.2, use_abs = True)
             # truth = targets
             
             # 计算当前batch的精度
@@ -129,19 +152,19 @@ def test_model(model, val_loader, sparsity=0.1):
     print('预测与标签选取的数量比:',(total_preds / total_labels))
     print('覆盖率(Recall):',(total_correct_preds / total_labels))
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, writer, epochs=25, layerid=1):
+def train_model(model, train_loader, val_loader, criterion, optimizer, writer, epochs=25, layerid=1, expertid=0):
     scaler = GradScaler()  # 创建 GradScaler 对象
     for epoch in range(epochs):
         if epoch % 2 == 0:
             print(f'---------after training {epoch} epochs---------')
-            test_model(model, val_loader, sparsity=0.2)
+            test_model(model, val_loader, sparsity=0.5)
         model.train()
         for batch_idx, (inputs, targets) in enumerate(train_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
 
             optimizer.zero_grad()
 
-            targets = generate_label(targets, 0.2, use_abs =True)
+            targets = generate_label(targets, 0.5, use_abs =True)
 
             # 使用 autocast 来进行自动混合精度处理
             with autocast():
@@ -160,29 +183,32 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, writer, e
     print(f'---------after training {epochs} epochs---------')
     test_model(model, val_loader, sparsity=0.2)
     global cnt
-    torch.save(model.state_dict(), f'./output/sparsity/{layerid}-{cnt}.pt')
+    if cnt == 1:
+        torch.save(model.state_dict(), f'./output/sparsity/{layerid}-{expertid}.pt')
     cnt += 1
 
 
-for layerid in range(22,32):
-    print(layerid)
-    model=SimpleLinearModel(4096,14336,hidden_dim=1024)
-    model.to("cuda")  # 假设使用 GPU
-    # criterion = nn.MSELoss().to("cuda")
-    criterion = nn.CrossEntropyLoss().to("cuda")
-    # criterion = nn.KLDivLoss(reduction='batchmean').to("cuda")
-    optimizer = optim.Adam(model.parameters(), lr=5e-4) #lr=5e-5
-    writer = SummaryWriter('runs/predictor_sparsity')
-    
-    cnt = 0
-    for startid, endid in [(1,4),(4,7),(7,10)]:
-        dataset = CustomDataset(layerid, startid=startid, endid=endid)
-        print(len(dataset)) # torch.Size([512, 4096])
-        # 划分训练集和验证集
-        train_size = int(0.9 * len(dataset))
-        val_size = len(dataset) - train_size
-        train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-        train_loader = DataLoader(train_dataset, batch_size=1024, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=1024, shuffle=False)
+# for layerid in range(22,32):
+#     for expertid in range(8):
+layerid, expertid = 15, 0
+print(layerid, expertid)
+model=SimpleLinearModel(4096,14336,hidden_dim=1024)
+model.to("cuda")  # 假设使用 GPU
+# criterion = nn.MSELoss().to("cuda")
+criterion = nn.CrossEntropyLoss().to("cuda")
+# criterion = nn.KLDivLoss(reduction='batchmean').to("cuda")
+optimizer = optim.Adam(model.parameters(), lr=5e-4) #lr=5e-5
+writer = SummaryWriter('runs/predictor_sparsity')
 
-        train_model(model, train_loader, val_loader, criterion, optimizer, writer=writer, epochs=4, layerid=layerid)
+cnt = 0
+for startid, endid in [(1,5),(5,9)]:
+    dataset = CustomDataset(layerid, expertid, startid=startid, endid=endid)
+    print(len(dataset)) # torch.Size([512, 4096])
+    # 划分训练集和验证集
+    train_size = int(0.9 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    train_loader = DataLoader(train_dataset, batch_size=1024, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=1024, shuffle=False)
+
+    train_model(model, train_loader, val_loader, criterion, optimizer, writer=writer, epochs=4, layerid=layerid, expertid=expertid)

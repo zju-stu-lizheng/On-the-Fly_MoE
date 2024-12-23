@@ -65,5 +65,5 @@ def run_c4(c4data, model, layerid = 15, sample_nums = 400):
 set_seed(42)
 c4data = get_c4_data(model_path, dataset_path, sample_num = 8000)
 model = get_model(model_path)
-for layerid in range(16,32):
+for layerid in range(15,32):
     run_c4(c4data, model, layerid=layerid, sample_nums=1000)
