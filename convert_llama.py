@@ -163,13 +163,14 @@ class MLPLayer(BaseMLPLayer):
     """
     mlp layer without coreinfer
     """
-    def __init__(self, module, sparsity, num=15, name = None, gamma=0.05):
+    def __init__(self, module, sparsity, num=15, start_num=0, name = None, gamma=0.05):
         super().__init__(num)
         self.act_fn = module.act_fn
         self.intermediate_size = module.up_proj.weight.size(0)  # 14336
         self.hidden_size = module.up_proj.weight.size(1)        # 4096
         self.sparsity = sparsity
         self.hc_nums = int(gamma * self.intermediate_size)
+        self.start_num = start_num
         neuron_num = int(self.intermediate_size * sparsity)
 
         ### new layer converted from nn.linear
@@ -178,7 +179,7 @@ class MLPLayer(BaseMLPLayer):
         self.down_proj = module.down_proj
         self.filtered_W_down = torch.zeros((self.hidden_size, neuron_num)).to(torch.float16).cuda()
 
-        if self.num > 0:
+        if self.num > start_num:
             self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
             weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.down_proj.weight.device)
             self.helper.load_state_dict(weight)
@@ -189,7 +190,7 @@ class MLPLayer(BaseMLPLayer):
     def forward(self, x):
         global pre_x
         pre_x = x
-        if self.num > 0:
+        if self.num > self.start_num:
             ### the final token activation for topk-selection
             up_mask_index = torch.topk(self.helper(pre_x)[:,-1,:], self.hc_nums).indices.flatten()  # torch.Size([1, 300, 4300])
             # print(up_mask_index.size())
@@ -217,7 +218,7 @@ def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1,
         if "mlp" in name and name.count('.') == 3:
             # print(name)
             num = int(name.split('.')[2])
-            if num>start_num and num<end_num:
+            if num>=start_num and num<end_num:
                 parent_name = name.rsplit('.', 1)[0] if '.' in name else '' # split from right 1 time
                 attr_name = name.rsplit('.', 1)[-1]
                 if parent_name != '':
@@ -228,7 +229,7 @@ def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1,
                     print(f"Converting Layer {name} with CoreInfer")
                     NewLayer = MLP_Core(module, sparsity, num=num, name = name, alpha=alpha, beta=beta, gamma=gamma, )
                 else:
-                    NewLayer = MLPLayer(module, sparsity, num=num, name = name, gamma=gamma)
+                    NewLayer = MLPLayer(module, sparsity, num=num, name = name, start_num=start_num, gamma=gamma)
                 setattr(parent, attr_name, NewLayer)
                 del module
     
