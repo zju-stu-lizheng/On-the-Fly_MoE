@@ -180,9 +180,10 @@ class MLPLayer(BaseMLPLayer):
         self.filtered_W_down = torch.zeros((self.hidden_size, neuron_num)).to(torch.float16).cuda()
 
         if self.num > start_num:
-            self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
-            weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.down_proj.weight.device)
-            self.helper.load_state_dict(weight)
+            self.median = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{num}-median.pth')
+            # self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
+            # weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.down_proj.weight.device)
+            # self.helper.load_state_dict(weight)
 
         del module.gate_proj
         del module.up_proj
@@ -191,8 +192,15 @@ class MLPLayer(BaseMLPLayer):
         global pre_x
         pre_x = x
         if self.num > self.start_num:
+            ### 用完整up，和gate的中位数去相乘，从而选择topk
+            up_result = self.up_proj(x)
+            # print(up_result[0][0][1])
+            predicts = up_result
+            # print(self.median[1], predicts[0][0][1])
+            ### abs
+            up_mask_index = torch.topk(torch.abs(predicts[:,-1,:]), self.hc_nums).indices.flatten()
             ### the final token activation for topk-selection
-            up_mask_index = torch.topk(self.helper(pre_x)[:,-1,:], self.hc_nums).indices.flatten()  # torch.Size([1, 300, 4300])
+            # up_mask_index = torch.topk(self.helper(pre_x)[:,-1,:], self.hc_nums).indices.flatten()  # torch.Size([1, 300, 4300])
             # print(up_mask_index.size())
             ### sparsity for up_mask_index
             true_value = self.act_fn(self.gate_proj(x, up_mask_index)) * self.up_proj(x, up_mask_index)            
