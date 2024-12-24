@@ -353,26 +353,19 @@ class LlamaMLP(nn.Module):
                 
             else:
                 up_result = self.up_proj(x)
-                v = torch.abs(activation*up_result)
-                mask = (v >= th[self.layer_idx][self.expert_idx]).to(x.dtype)
+                current_hidden_states = up_result * activation
+                v = torch.abs(current_hidden_states)
+                _, topk_indices = torch.topk(v, int(0.2 * current_hidden_states.size(-1)), dim=-1)
+                # 创建一个与activation相同形状的全零tensor
+                sparse_gate_result = torch.zeros_like(activation)
+                # 将topk位置的值设为原始值
+                sparse_gate_result.scatter_(-1, topk_indices, torch.gather(activation, -1, topk_indices))
                 #### 动态预测数据采集
                 if profile_sparsity:
-                    if self.layer_idx == skip_layer_idx - 1:
+                    if self.layer_idx == skip_layer_idx:
                         dataset_x.append(x)
-                    elif self.layer_idx == skip_layer_idx:
-                    # if self.layer_idx == skip_layer_idx:
-                        # dataset_x1.append(activation)
-                        dataset_y.append(activation)
-                        # dataset_y.append(activation)
-                    # elif self.layer_idx == skip_layer_idx + 1:
-                    #     # dataset_x.append(x)
-                    #     dataset_y.append(v)
-                ## 只有当需要记录的layer进来，我才去根据mask稀疏
-                # if self.layer_idx == skip_layer_idx:
-                current_hidden_states = torch.mul(up_result, mask) * torch.mul(activation, mask)
-                # else:
-                #     current_hidden_states = up_result * activation
-                
+                        dataset_y.append(sparse_gate_result)
+                      
             down_proj = self.down_proj(current_hidden_states)
 
         # if profile_sparsity:    
