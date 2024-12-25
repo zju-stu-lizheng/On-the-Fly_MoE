@@ -1,12 +1,12 @@
 import torch
 import json
-from modeling_llama_up import step, x_small, x_all
+from modeling_llama_up import step, x_small, x_all, set_profile_mode
 import os
 import csv
 from utils import get_c4_data, get_model, set_seed
 from tqdm import tqdm
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 ### from path.json read paths of model and dataset
 model_name = "Llama3-8b"
 dataset_name = "c4"
@@ -39,11 +39,12 @@ def run_c4(c4data, model, sample_nums = 400):
 set_seed(42)
 c4data = get_c4_data(model_path, dataset_path, sample_num = 400)
 model = get_model(model_path)
+set_profile_mode(mode = True)
 run_c4(c4data, model)
 
 layer_num = 32
 expert_num = 1
-output_file = f'{save_path}/output-c4-llama3-{step}.csv'
+output_file = f'{save_path}/output-channel-{step}.csv'
 
 with open(output_file, mode='w', newline='') as file:
     writer = csv.writer(file)
@@ -86,7 +87,7 @@ def get_threshold(th = 0.7):
             # print(index, item)
             p += item   ## p 是累加的概率
             if expert_num == 1:
-                t[(mlp-1)] = [(index+0.5)*(1.0/step)]
+                t[(mlp - 1)] = [(index+0.5)*(1.0/step)]
             else:
                 t[(mlp - 1) // expert_num][(mlp - 1) % expert_num] = (index+0.5)*(1.0/step)
             if p >= th:

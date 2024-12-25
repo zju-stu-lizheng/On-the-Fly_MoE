@@ -303,6 +303,11 @@ class LlamaMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
+        ### 加载当层的gate平均值
+        self.start_num = 21
+        if layer_idx > self.start_num:
+            self.gate_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{layer_idx}-average.pth')
+
     def forward(self, x, attention_mask=None):
         if self.config.pretraining_tp > 1:
             slice = self.intermediate_size // self.config.pretraining_tp
@@ -332,7 +337,10 @@ class LlamaMLP(nn.Module):
                 global x_all
                 global x_small
                 up_result = self.up_proj(x)
-                current_hidden_states = activation * up_result
+                if self.layer_idx > self.start_num:
+                    current_hidden_states = torch.mul(up_result,self.gate_average)
+                else:
+                    current_hidden_states = activation * up_result
                 v = torch.abs(current_hidden_states)
                 if profile_x_pos:
                     global x_pos
@@ -347,24 +355,24 @@ class LlamaMLP(nn.Module):
                         print(attention_mask.shape, v.shape)
                         v = v * attention_mask.unsqueeze(-1)
                     
-                    x_all[self.layer_idx][self.expert_idx] += torch.numel(up_result)
+                    x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
                     for i in range(step):
-                        x_small[self.layer_idx][self.expert_idx][i] += torch.sum( up_result < (1.0/step)*(i+1) ).item()
+                        x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (1.0/step)*(i+1) ).item()
                 
             else:
                 up_result = self.up_proj(x)
                 current_hidden_states = up_result * activation
-                v = torch.abs(current_hidden_states)
-                _, topk_indices = torch.topk(v, int(0.2 * current_hidden_states.size(-1)), dim=-1)
-                # 创建一个与activation相同形状的全零tensor
-                sparse_gate_result = torch.zeros_like(activation)
-                # 将topk位置的值设为原始值
-                sparse_gate_result.scatter_(-1, topk_indices, torch.gather(activation, -1, topk_indices))
+                # v = torch.abs(current_hidden_states)
+                # _, topk_indices = torch.topk(v, int(0.2 * current_hidden_states.size(-1)), dim=-1)
+                # # 创建一个与activation相同形状的全零tensor
+                # sparse_gate_result = torch.zeros_like(activation)
+                # # 将topk位置的值设为原始值
+                # sparse_gate_result.scatter_(-1, topk_indices, torch.gather(activation, -1, topk_indices))
                 #### 动态预测数据采集
                 if profile_sparsity:
                     if self.layer_idx == skip_layer_idx:
                         dataset_x.append(x)
-                        dataset_y.append(sparse_gate_result)
+                        dataset_y.append(activation)
                       
             down_proj = self.down_proj(current_hidden_states)
 

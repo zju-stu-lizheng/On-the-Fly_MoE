@@ -1,5 +1,6 @@
 #### convert llama model for sparsity
 import gc
+import csv
 import torch 
 import torch.nn as nn
 
@@ -19,6 +20,26 @@ class SimpleLinearModel(nn.Module):
         return self.linear2(self.linear1(x))
 
 
+def read_csv_to_2d_list(filename):
+    data_2d_list = []
+    with open(filename, 'r') as file:
+        reader = csv.reader(file)
+        for row in reader:
+            # 将每一行的字符串转换为浮点数
+            float_row = [float(value) for value in row]
+            data_2d_list.append(float_row)
+    return data_2d_list
+
+def set_th_sparsity(sparsity, dataset='c4_llama3'):
+    """
+    根据稀疏程度读取对应的阈值
+    """
+    filename=f"./saving/threshold/{dataset}/th_{sparsity}.csv"
+    th = read_csv_to_2d_list(filename)
+    return th
+
+th = set_th_sparsity(sparsity=70)
+
 class Linearlayer(nn.Module):
     """
     sparse linear layer
@@ -28,14 +49,16 @@ class Linearlayer(nn.Module):
         self.weight = weight.clone().cuda()
         intermediate_size = weight.size(0)
         neuron_num = int(intermediate_size * sparsity)
-        self.filtered_W = torch.zeros((neuron_num, weight.size(1))).to(torch.float16).cuda()
+        # self.filtered_W = torch.zeros((neuron_num, weight.size(1))).to(torch.float16).cuda()
         self.layer_idx = num
 
-    def forward(self, x, indices=None):
-        if indices != None:
-            self.filtered_W = self.weight[indices,:]
+    def forward(self, x, indices=None, mask=None):
+        if mask != None:
+            ### 不应该对原始的weight用indices进行修改，应该是x乘完w，再乘mask
+            # self.filtered_W = self.weight[indices,:]
             # print(self.filtered_W.shape)
-            true_value = x@self.filtered_W.T
+            # true_value = x@self.filtered_W.T
+            true_value = torch.mul(x@self.weight.T, mask)
         else:
             true_value = x@self.weight.T
             
@@ -177,16 +200,23 @@ class MLPLayer(BaseMLPLayer):
         self.gate_proj = Linearlayer(module.gate_proj.weight, sparsity=sparsity, num=num, )
         self.up_proj = Linearlayer(module.up_proj.weight, sparsity=sparsity, num=num, )
         self.down_proj = module.down_proj
-        self.filtered_W_down = torch.zeros((self.hidden_size, neuron_num)).to(torch.float16).cuda()
+        # self.filtered_W_down = torch.zeros((self.hidden_size, neuron_num)).to(torch.float16).cuda()
 
         if self.num > start_num:
-            self.median = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{num}-median.pth')
+            self.average_gate = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{num}-average.pth')
             # self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
             # weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.down_proj.weight.device)
             # self.helper.load_state_dict(weight)
+            self.ratio = []
 
         del module.gate_proj
         del module.up_proj
+
+    def print_ratio(self):
+        # 统计self.ratio 平均值
+        import numpy as np
+        print(f'layer {self.num} ratio: {np.mean(self.ratio)}')
+        # print(f'layer {self.num} ratio: {self.ratio}')
                 
     def forward(self, x):
         global pre_x
@@ -194,26 +224,31 @@ class MLPLayer(BaseMLPLayer):
         if self.num > self.start_num:
             ### 用完整up，和gate的中位数去相乘，从而选择topk
             up_result = self.up_proj(x)
-            # print(up_result[0][0][1])
-            predicts = up_result
-            # print(self.median[1], predicts[0][0][1])
-            ### abs
-            up_mask_index = torch.topk(torch.abs(predicts[:,-1,:]), self.hc_nums).indices.flatten()
+            predicts = torch.abs(up_result * self.average_gate)
+            ### 换成阈值的方法
+            # up_mask_index = torch.topk(predicts[:,:,:], self.hc_nums).indices.flatten()
+            mask = (predicts >= th[self.num][0]).to(x.dtype) ### 0是因为只有一个专家，对于llama模型来说
+            
+            ### 统计真实保存的部分
+            true_ratio = mask.float().mean().item()  # 计算True的比例
+            # print(f"True ratio in mask: {true_ratio:.4f}")
+            self.ratio.append(true_ratio)
             ### the final token activation for topk-selection
             # up_mask_index = torch.topk(self.helper(pre_x)[:,-1,:], self.hc_nums).indices.flatten()  # torch.Size([1, 300, 4300])
             # print(up_mask_index.size())
+            
             ### sparsity for up_mask_index
-            true_value = self.act_fn(self.gate_proj(x, up_mask_index)) * self.up_proj(x, up_mask_index)            
-            self.filtered_W_down = self.down_proj.weight[:,up_mask_index]
-            down_value = true_value @ self.filtered_W_down.T
+            true_value = self.act_fn(self.gate_proj(x, mask=mask)) * self.up_proj(x, mask=mask)            
+            # self.filtered_W_down = self.down_proj.weight[:,up_mask_index]
+            down_value = self.down_proj(true_value) ###这里不做mask是简化运算，因为不mask也是0
 
-            v = torch.abs(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+            # v = torch.abs(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
             ### calculate recall
-            self.predict_all.append(up_mask_index.size(0))
-            mask_indices = torch.topk(v[:,-1,:], int(self.sparsity * self.intermediate_size)).indices.flatten()
-            overlap_count = torch.isin(mask_indices, up_mask_index).sum().item()
-            self.overlap_clist.append(overlap_count)
-            self.overlap_all.append(int(self.sparsity * self.intermediate_size))
+            # self.predict_all.append(up_mask_index.size(0))
+            # mask_indices = torch.topk(v[:,-1,:], int(self.sparsity * self.intermediate_size)).indices.flatten()
+            # overlap_count = torch.isin(mask_indices, up_mask_index).sum().item()
+            # self.overlap_clist.append(overlap_count)
+            # self.overlap_all.append(int(self.sparsity * self.intermediate_size))
         else:
             true_value = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
             down_value = self.down_proj(true_value)
