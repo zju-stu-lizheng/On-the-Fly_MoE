@@ -304,7 +304,7 @@ class LlamaMLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
         ### 加载当层的gate平均值
-        self.start_num = 21
+        self.start_num = -1
         if layer_idx > self.start_num:
             self.gate_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{layer_idx}-average.pth')
 
@@ -350,10 +350,10 @@ class LlamaMLP(nn.Module):
                     x_pos[self.layer_idx][self.expert_idx] += nonzero_counts
                 
                 if(self.layer_idx is not None and self.expert_idx is not None):
-                    #### 按照attention_mask取截取v
-                    if attention_mask is not None:
-                        print(attention_mask.shape, v.shape)
-                        v = v * attention_mask.unsqueeze(-1)
+                    # #### 按照attention_mask取截取v
+                    # if attention_mask is not None:
+                    #     print(attention_mask.shape, v.shape)
+                    #     v = v * attention_mask.unsqueeze(-1)
                     
                     x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
                     for i in range(step):

@@ -10,14 +10,13 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 ### from path.json read paths of model and dataset
 model_name = "Llama3-8b"
 dataset_name = "c4"
-MAX_LENGTH = 512
 with open('../path.json', 'r') as file:
     paths = json.load(file)
     model_path = paths.get(model_name, '')
     dataset_path = paths.get(dataset_name, '')
     save_path = paths.get('threshold_path','')
 
-def run_c4(c4data, model, sample_nums = 400):
+def run_c4(c4data, model):
     # 计算评估损失
     total_loss = 0.0
 
@@ -37,7 +36,7 @@ def run_c4(c4data, model, sample_nums = 400):
     print(f"Eval Loss: {eval_loss}")
 
 set_seed(42)
-c4data = get_c4_data(model_path, dataset_path, sample_num = 400)
+c4data = get_c4_data(model_path, dataset_path, sample_num = 8000)
 model = get_model(model_path)
 set_profile_mode(mode = True)
 run_c4(c4data, model)
@@ -102,5 +101,5 @@ def get_threshold(th = 0.7):
 for th in range(5, 10):
     get_threshold(th * 0.1)
 
-get_threshold(0.95)
+# get_threshold(0.95)
 get_threshold(0)

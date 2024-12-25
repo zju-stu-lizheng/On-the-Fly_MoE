@@ -207,15 +207,20 @@ class MLPLayer(BaseMLPLayer):
             # self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
             # weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.down_proj.weight.device)
             # self.helper.load_state_dict(weight)
-            self.ratio = []
+            self.count_sum = 0
+            ### 同时统计token的个数
+            self.token_sum = 0
 
         del module.gate_proj
         del module.up_proj
 
     def print_ratio(self):
         # 统计self.ratio 平均值
-        import numpy as np
-        print(f'layer {self.num} ratio: {np.mean(self.ratio)}')
+        print(f'layer {self.num} ratio: {self.count_sum/self.token_sum:.4f}')
+        self.count_sum = 0
+        self.token_sum = 0
+        # import numpy as np
+        # print(f'layer {self.num} ratio: {np.mean(self.ratio)}')
         # print(f'layer {self.num} ratio: {self.ratio}')
                 
     def forward(self, x):
@@ -224,15 +229,16 @@ class MLPLayer(BaseMLPLayer):
         if self.num > self.start_num:
             ### 用完整up，和gate的中位数去相乘，从而选择topk
             up_result = self.up_proj(x)
-            predicts = torch.abs(up_result * self.average_gate)
+            predicts = torch.abs(torch.mul(up_result, self.average_gate))
             ### 换成阈值的方法
             # up_mask_index = torch.topk(predicts[:,:,:], self.hc_nums).indices.flatten()
             mask = (predicts >= th[self.num][0]).to(x.dtype) ### 0是因为只有一个专家，对于llama模型来说
             
             ### 统计真实保存的部分
-            true_ratio = mask.float().mean().item()  # 计算True的比例
+            true_ratio = mask.float().sum().item()  # 计算True的比例
             # print(f"True ratio in mask: {true_ratio:.4f}")
-            self.ratio.append(true_ratio)
+            self.count_sum += true_ratio
+            self.token_sum += mask.numel()
             ### the final token activation for topk-selection
             # up_mask_index = torch.topk(self.helper(pre_x)[:,-1,:], self.hc_nums).indices.flatten()  # torch.Size([1, 300, 4300])
             # print(up_mask_index.size())

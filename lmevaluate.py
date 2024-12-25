@@ -48,7 +48,7 @@ def main(task_name_list, model_name, sparsity, start_num, end_num, token_sparsit
                                     beta=beta, gamma=gamma, use_core=False)
 
     evaluate(task_name_list, model, tokenizer, num_fewshot, device)
-    for layerid in range(22,32):
+    for layerid in range(start_num+1,end_num):
         ### 输出每层稀疏度的平均值
         model.model.layers[layerid].mlp.print_ratio()
         # print(f"Layer {layerid} sparsity: {}")
@@ -56,11 +56,11 @@ def main(task_name_list, model_name, sparsity, start_num, end_num, token_sparsit
 
 # triviaqa
 task_list=['boolq','sciq','openbookqa','winogrande','arc_challenge','arc_easy']
-# task_list=['truthfulqa_gen','triviaqa']
+# task_list=['truthfulqa_gen','triviaqa_gen']
 num_fewshot = 0
 beta = 0.1
 gammma = 0.3
-start_num = 21
+start_num = -1
 
 # task_list=['truthfulqa_gen','boolq']
 main(task_name_list=task_list, model_name="Llama3-8b", sparsity=0.1, start_num=start_num, end_num=32, token_sparsity=0.1,
