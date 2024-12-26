@@ -77,6 +77,7 @@ def set_profile_mode(mode):
 th = None
 # 设置间隔 400
 step = 800
+maxval=0.5  ### 1 for silu*up but 0.1 for average * up
 intermediate_size=14336
 expert_num=1
 x_all = [[0 for _ in range(expert_num)] for _ in range(32)]
@@ -306,7 +307,7 @@ class LlamaMLP(nn.Module):
         ### 加载当层的gate平均值
         self.start_num = -1
         if layer_idx > self.start_num:
-            self.gate_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{layer_idx}-average.pth')
+            self.gate_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{layer_idx}-average.pth').to(torch.float16)
 
     def forward(self, x, attention_mask=None):
         if self.config.pretraining_tp > 1:
@@ -357,7 +358,7 @@ class LlamaMLP(nn.Module):
                     
                     x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
                     for i in range(step):
-                        x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (1.0/step)*(i+1) ).item()
+                        x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (maxval/step)*(i+1) ).item()
                 
             else:
                 up_result = self.up_proj(x)

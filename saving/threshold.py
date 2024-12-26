@@ -1,6 +1,6 @@
 import torch
 import json
-from modeling_llama_up import step, x_small, x_all, set_profile_mode
+from modeling_llama_up import step, x_small, x_all, set_profile_mode, maxval
 import os
 import csv
 from utils import get_c4_data, get_model, set_seed
@@ -36,7 +36,7 @@ def run_c4(c4data, model):
     print(f"Eval Loss: {eval_loss}")
 
 set_seed(42)
-c4data = get_c4_data(model_path, dataset_path, sample_num = 8000)
+c4data = get_c4_data(model_path, dataset_path, sample_num = 400)
 model = get_model(model_path)
 set_profile_mode(mode = True)
 run_c4(c4data, model)
@@ -49,16 +49,16 @@ with open(output_file, mode='w', newline='') as file:
     writer = csv.writer(file)
     col=[]
     for i in range(step):
-        col.append((1.0/step)*(i+1))
+        col.append((maxval/step)*(i+1))
     writer.writerow(col)
 
     for layer in range(0, layer_num):
         for expert in range(expert_num):
             row = []
             if x_all[layer][expert] != 0:
-                row.append("%.4f" % (x_small[layer][expert][0] * 1.0 / x_all[layer][expert]))
+                row.append("%.4f" % (x_small[layer][expert][0] * maxval / x_all[layer][expert]))
                 for i in range(step - 1):
-                    row.append("%.4f" % ((x_small[layer][expert][i + 1] - x_small[layer][expert][i]) * 1.0 / x_all[layer][expert]))
+                    row.append("%.4f" % ((x_small[layer][expert][i + 1] - x_small[layer][expert][i]) / x_all[layer][expert]))
             else:
                 for i in range(step):
                     row.append("%.4f" % 0.0)
@@ -86,9 +86,9 @@ def get_threshold(th = 0.7):
             # print(index, item)
             p += item   ## p 是累加的概率
             if expert_num == 1:
-                t[(mlp - 1)] = [(index+0.5)*(1.0/step)]
+                t[(mlp - 1)] = [(index+0.5)*(maxval/step)]
             else:
-                t[(mlp - 1) // expert_num][(mlp - 1) % expert_num] = (index+0.5)*(1.0/step)
+                t[(mlp - 1) // expert_num][(mlp - 1) % expert_num] = (index+0.5)*(maxval/step)
             if p >= th:
                 break
 

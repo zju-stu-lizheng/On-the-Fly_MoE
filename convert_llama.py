@@ -47,8 +47,8 @@ class Linearlayer(nn.Module):
     def __init__(self, weight, sparsity=0.1, num=15, name = None):
         super(Linearlayer, self).__init__()
         self.weight = weight.clone().cuda()
-        intermediate_size = weight.size(0)
-        neuron_num = int(intermediate_size * sparsity)
+        # intermediate_size = weight.size(0)
+        # neuron_num = int(intermediate_size * sparsity)
         # self.filtered_W = torch.zeros((neuron_num, weight.size(1))).to(torch.float16).cuda()
         self.layer_idx = num
 
@@ -224,12 +224,15 @@ class MLPLayer(BaseMLPLayer):
         # print(f'layer {self.num} ratio: {self.ratio}')
                 
     def forward(self, x):
-        global pre_x
-        pre_x = x
+        # global pre_x
+        # pre_x = x
         if self.num > self.start_num:
-            ### 用完整up，和gate的中位数去相乘，从而选择topk
+            ### 用完整up，和gate的平均数去相乘
             up_result = self.up_proj(x)
             predicts = torch.abs(torch.mul(up_result, self.average_gate))
+            if self.num == 0:
+                print('predicts max:', predicts.max(), 'the max of average_gate:', self.average_gate.max())
+                print('threshold:', th[self.num][0])
             ### 换成阈值的方法
             # up_mask_index = torch.topk(predicts[:,:,:], self.hc_nums).indices.flatten()
             mask = (predicts >= th[self.num][0]).to(x.dtype) ### 0是因为只有一个专家，对于llama模型来说

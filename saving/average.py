@@ -58,16 +58,23 @@ class CustomDataset(Dataset):
         
 
 for layerid in range(32):
-    dataset = CustomDataset(layerid, startid=1, endid=5)
+    dataset = CustomDataset(layerid, startid=1, endid=2)
     print(layerid, len(dataset), dataset[0][0].shape, dataset[0][1].shape) # torch.Size([512, 4096])
     
     ### 统计的个数
     counts = len(dataset)
     
-    updata_sum = torch.zeros_like(dataset[0][1])
+    # 将所有张量堆叠成一个大的张量
+    stacked_data = torch.stack([dataset[i][1].to(torch.float32) for i in range(counts)])
 
-    for i in range(counts):
-        updata_sum += torch.abs(dataset[i][1])
+    # 计算绝对值并求和
+    updata_sum = torch.abs(stacked_data).sum(dim=0)
 
     updata_sum /= counts
     torch.save(updata_sum, f'{save_path}/{layerid}-average.pth')
+    ### 清空缓存
+    del dataset
+    del stacked_data
+    del updata_sum
+    torch.cuda.empty_cache()
+    print(f'{layerid} has been saved')
