@@ -8,7 +8,7 @@ import json
 
 with open('../path.json', 'r') as file:
     paths = json.load(file)
-    save_path = paths.get('channel_gate_path','')
+    save_path = paths.get('channel_up_path','')
 
 def load_datasets(layerid = 1, expertid = 0, startid=1, endid=4, use_x1 = False):   
     datasets_x = []

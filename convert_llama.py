@@ -38,7 +38,7 @@ def set_th_sparsity(sparsity, dataset='c4_llama3'):
     th = read_csv_to_2d_list(filename)
     return th
 
-th = set_th_sparsity(sparsity=70)
+th = set_th_sparsity(sparsity=70, dataset='c4_llama3_up')
 
 class Linearlayer(nn.Module):
     """
@@ -196,7 +196,8 @@ class MLPLayer(BaseMLPLayer):
         self.down_proj = module.down_proj
 
         if self.num > start_num:
-            self.average_gate = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{num}-average.pth')
+            # self.average_gate = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{num}-average.pth')
+            self.up_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelup/{num}-average.pth')
             ### saving for self.ratio average value
             self.count_sum = 0
             self.token_sum = 0
@@ -215,8 +216,10 @@ class MLPLayer(BaseMLPLayer):
     def forward(self, x):
         if self.num > self.start_num:
             ### Multiply complete up projection with gate average
-            up_result = self.up_proj(x)
-            predicts = torch.abs(torch.mul(up_result, self.average_gate))
+            # up_result = self.up_proj(x)
+            # predicts = torch.abs(torch.mul(up_result, self.average_gate))
+            gate_result = self.act_fn(self.gate_proj(x))
+            predicts = torch.abs(torch.mul(gate_result, self.up_average))
             ### Threshold method
             mask = (predicts >= th[self.num][0]).to(x.dtype) ### 0 because there is only one expert for llama model
             

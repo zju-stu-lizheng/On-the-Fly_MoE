@@ -14,7 +14,7 @@ with open('../path.json', 'r') as file:
     paths = json.load(file)
     model_path = paths.get(model_name, '')
     dataset_path = paths.get(dataset_name, '')
-    save_path = paths.get('threshold_path','')
+    save_path = paths.get('threshold_up_path','')
 
 def run_c4(c4data, model):
     # 计算评估损失

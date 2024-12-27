@@ -306,8 +306,11 @@ class LlamaMLP(nn.Module):
 
         ### 加载当层的gate平均值
         self.start_num = -1
-        if layer_idx > self.start_num:
-            self.gate_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{layer_idx}-average.pth').to(torch.float16)
+        if (layer_idx > self.start_num):
+            try:
+                self.up_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelup/{layer_idx}-average.pth').to(torch.float16)
+            except:
+                print(f'load {layer_idx} average failed')
 
     def forward(self, x, attention_mask=None):
         if self.config.pretraining_tp > 1:
@@ -339,7 +342,7 @@ class LlamaMLP(nn.Module):
                 global x_small
                 up_result = self.up_proj(x)
                 if self.layer_idx > self.start_num:
-                    current_hidden_states = torch.mul(up_result,self.gate_average)
+                    current_hidden_states = torch.mul(activation,self.up_average)
                 else:
                     current_hidden_states = activation * up_result
                 v = torch.abs(current_hidden_states)
@@ -373,7 +376,7 @@ class LlamaMLP(nn.Module):
                 if profile_sparsity:
                     if self.layer_idx == skip_layer_idx:
                         dataset_x.append(x)
-                        dataset_y.append(activation)
+                        dataset_y.append(up_result)
                       
             down_proj = self.down_proj(current_hidden_states)
 

@@ -13,7 +13,7 @@ with open('../path.json', 'r') as file:
     paths = json.load(file)
     model_path = paths.get(model_name, '')
     dataset_path = paths.get(dataset_name, '')
-    save_path = paths.get('channel_gate_path','')
+    save_path = paths.get('channel_up_path','')
     ### channel_gate_path： more对应的是up, gate才是silu*gate
     ### gate_path: (i-1)-th layer x and i-th layer silu(gate)
 
