@@ -83,7 +83,7 @@ expert_num=1
 x_all = [[0 for _ in range(expert_num)] for _ in range(32)]
 x_small = [[[0 for _ in range(step)] for _ in range(expert_num)] for _ in range(32)]
 x_pos = [[torch.zeros(intermediate_size) for _ in range(expert_num)] for _ in range(32)]
-profile_sparsity = True
+profile_sparsity = False
 skip_layer_idx = 31
 dataset_x = []  ## 需要按专家分
 dataset_x1 = []  ## 需要按专家分
@@ -331,16 +331,16 @@ class LlamaMLP(nn.Module):
             down_proj = sum(down_proj)
         else:
             activation = self.act_fn(self.gate_proj(x))
+            self.gate_proj_states = activation.detach().cpu()
+            up_result = self.up_proj(x)
+            self.up_proj_states = up_result.detach().cpu()
             
             global th
             if profile_mode:
-                # if self.layer_idx == 0:
-                #     # print(attention_mask.shape)
-                #     print('in profile mode')
                 ## 统计分布
-                global x_all
-                global x_small
-                up_result = self.up_proj(x)
+                # global x_all
+                # global x_small
+                
                 if self.layer_idx > self.start_num:
                     current_hidden_states = torch.mul(activation,self.up_average)
                 else:
@@ -353,18 +353,17 @@ class LlamaMLP(nn.Module):
                     # print(nonzero_counts.shape) # 14336
                     x_pos[self.layer_idx][self.expert_idx] += nonzero_counts
                 
-                if(self.layer_idx is not None and self.expert_idx is not None):
-                    # #### 按照attention_mask取截取v
-                    # if attention_mask is not None:
-                    #     print(attention_mask.shape, v.shape)
-                    #     v = v * attention_mask.unsqueeze(-1)
+                # if(self.layer_idx is not None and self.expert_idx is not None):
+                #     # #### 按照attention_mask取截取v
+                #     # if attention_mask is not None:
+                #     #     print(attention_mask.shape, v.shape)
+                #     #     v = v * attention_mask.unsqueeze(-1)
                     
-                    x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
-                    for i in range(step):
-                        x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (maxval/step)*(i+1) ).item()
+                #     x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
+                #     for i in range(step):
+                #         x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (maxval/step)*(i+1) ).item()
                 
             else:
-                up_result = self.up_proj(x)
                 current_hidden_states = up_result * activation
                 # v = torch.abs(current_hidden_states)
                 # _, topk_indices = torch.topk(v, int(0.2 * current_hidden_states.size(-1)), dim=-1)
@@ -373,10 +372,10 @@ class LlamaMLP(nn.Module):
                 # # 将topk位置的值设为原始值
                 # sparse_gate_result.scatter_(-1, topk_indices, torch.gather(activation, -1, topk_indices))
                 #### 动态预测数据采集
-                if profile_sparsity:
-                    if self.layer_idx == skip_layer_idx:
-                        dataset_x.append(x)
-                        dataset_y.append(up_result)
+                # if profile_sparsity:
+                #     if self.layer_idx == skip_layer_idx:
+                #         dataset_x.append(x)
+                #         dataset_y.append(up_result)
                       
             down_proj = self.down_proj(current_hidden_states)
 

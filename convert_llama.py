@@ -38,7 +38,10 @@ def set_th_sparsity(sparsity, dataset='c4_llama3'):
     th = read_csv_to_2d_list(filename)
     return th
 
-th = set_th_sparsity(sparsity=70, dataset='c4_llama3_up')
+# gate_th = torch.load('./saving/threshold/chess/thresholds_0_7.pt')["gate_proj_states_thresholds_2"]
+up_th = torch.load('./saving/threshold/chess/up_threshold/thresholds_0_7.pt')["up_proj_states_thresholds_2"]
+
+# th = set_th_sparsity(sparsity=70, dataset='c4_llama3_up')
 
 class Linearlayer(nn.Module):
     """
@@ -197,8 +200,10 @@ class MLPLayer(BaseMLPLayer):
 
         if self.num > start_num:
             # self.average_gate = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{num}-average.pth')
-            self.up_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelup/{num}-average.pth')
+            # self.up_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelup/{num}-average.pth')
             ### saving for self.ratio average value
+            # self.gate_threshold = gate_th[self.num].cuda()
+            self.up_threshold = up_th[self.num].cuda()
             self.count_sum = 0
             self.token_sum = 0
 
@@ -216,20 +221,22 @@ class MLPLayer(BaseMLPLayer):
     def forward(self, x):
         if self.num > self.start_num:
             ### Multiply complete up projection with gate average
-            # up_result = self.up_proj(x)
+            up_result = self.up_proj(x)
             # predicts = torch.abs(torch.mul(up_result, self.average_gate))
-            gate_result = self.act_fn(self.gate_proj(x))
-            predicts = torch.abs(torch.mul(gate_result, self.up_average))
+            gate_proj_states = self.act_fn(self.gate_proj(x))
             ### Threshold method
-            mask = (predicts >= th[self.num][0]).to(x.dtype) ### 0 because there is only one expert for llama model
+            up_proj_states = torch.where(up_result.abs() > self.up_threshold, up_result, 0.0, )
+            # mask = (predicts >= gate_th[self.num]).to(x.dtype) ### 0 because there is only one expert for llama model
             
             ### Calculate actual preserved ratio
-            true_ratio = mask.float().sum().item()  # Calculate proportion of True values
+            # true_ratio = mask.float().sum().item()  # Calculate proportion of True values
+            ### gate_proj_states 非0的个数
+            true_ratio = (up_proj_states != 0).sum().item()
             self.count_sum += true_ratio
-            self.token_sum += mask.numel()
+            self.token_sum += up_proj_states.numel()
             
             ### sparsity for up_mask_index
-            true_value = self.act_fn(self.gate_proj(x, mask=mask)) * self.up_proj(x, mask=mask)            
+            true_value = up_proj_states * gate_proj_states         
             down_value = self.down_proj(true_value) ### No mask here to simplify computation since masked values are 0 anyway
         else:
             true_value = self.act_fn(self.gate_proj(x)) * self.up_proj(x)

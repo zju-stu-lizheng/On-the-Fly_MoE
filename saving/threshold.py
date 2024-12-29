@@ -38,7 +38,7 @@ def run_c4(c4data, model):
 set_seed(42)
 c4data = get_c4_data(model_path, dataset_path, sample_num = 400)
 model = get_model(model_path)
-set_profile_mode(mode = True)
+set_profile_mode(mode = False)
 run_c4(c4data, model)
 
 layer_num = 32
