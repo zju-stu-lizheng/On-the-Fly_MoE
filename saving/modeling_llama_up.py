@@ -77,12 +77,13 @@ def set_profile_mode(mode):
 th = None
 # 设置间隔 400
 step = 800
+maxval=0.5  ### 1 for silu*up but 0.1 for average * up
 intermediate_size=14336
 expert_num=1
 x_all = [[0 for _ in range(expert_num)] for _ in range(32)]
 x_small = [[[0 for _ in range(step)] for _ in range(expert_num)] for _ in range(32)]
 x_pos = [[torch.zeros(intermediate_size) for _ in range(expert_num)] for _ in range(32)]
-profile_sparsity = True
+profile_sparsity = False
 skip_layer_idx = 31
 dataset_x = []  ## 需要按专家分
 dataset_x1 = []  ## 需要按专家分
@@ -303,6 +304,14 @@ class LlamaMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
+        ### 加载当层的gate平均值
+        self.start_num = -1
+        if (layer_idx > self.start_num):
+            try:
+                self.up_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelup/{layer_idx}-average.pth').to(torch.float16)
+            except:
+                print(f'load {layer_idx} average failed')
+
     def forward(self, x, attention_mask=None):
         if self.config.pretraining_tp > 1:
             slice = self.intermediate_size // self.config.pretraining_tp
@@ -322,17 +331,20 @@ class LlamaMLP(nn.Module):
             down_proj = sum(down_proj)
         else:
             activation = self.act_fn(self.gate_proj(x))
+            self.gate_proj_states = activation.detach().cpu()
+            up_result = self.up_proj(x)
+            self.up_proj_states = up_result.detach().cpu()
             
             global th
             if profile_mode:
-                # if self.layer_idx == 0:
-                #     # print(attention_mask.shape)
-                #     print('in profile mode')
                 ## 统计分布
-                global x_all
-                global x_small
-                up_result = self.up_proj(x)
-                current_hidden_states = activation * up_result
+                # global x_all
+                # global x_small
+                
+                if self.layer_idx > self.start_num:
+                    current_hidden_states = torch.mul(activation,self.up_average)
+                else:
+                    current_hidden_states = activation * up_result
                 v = torch.abs(current_hidden_states)
                 if profile_x_pos:
                     global x_pos
@@ -341,38 +353,30 @@ class LlamaMLP(nn.Module):
                     # print(nonzero_counts.shape) # 14336
                     x_pos[self.layer_idx][self.expert_idx] += nonzero_counts
                 
-                if(self.layer_idx is not None and self.expert_idx is not None):
-                    #### 按照attention_mask取截取v
-                    if attention_mask is not None:
-                        print(attention_mask.shape, v.shape)
-                        v = v * attention_mask.unsqueeze(-1)
+                # if(self.layer_idx is not None and self.expert_idx is not None):
+                #     # #### 按照attention_mask取截取v
+                #     # if attention_mask is not None:
+                #     #     print(attention_mask.shape, v.shape)
+                #     #     v = v * attention_mask.unsqueeze(-1)
                     
-                    x_all[self.layer_idx][self.expert_idx] += torch.numel(up_result)
-                    for i in range(step):
-                        x_small[self.layer_idx][self.expert_idx][i] += torch.sum( up_result < (1.0/step)*(i+1) ).item()
+                #     x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
+                #     for i in range(step):
+                #         x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (maxval/step)*(i+1) ).item()
                 
             else:
-                up_result = self.up_proj(x)
-                v = torch.abs(activation*up_result)
-                mask = (v >= th[self.layer_idx][self.expert_idx]).to(x.dtype)
+                current_hidden_states = up_result * activation
+                # v = torch.abs(current_hidden_states)
+                # _, topk_indices = torch.topk(v, int(0.2 * current_hidden_states.size(-1)), dim=-1)
+                # # 创建一个与activation相同形状的全零tensor
+                # sparse_gate_result = torch.zeros_like(activation)
+                # # 将topk位置的值设为原始值
+                # sparse_gate_result.scatter_(-1, topk_indices, torch.gather(activation, -1, topk_indices))
                 #### 动态预测数据采集
-                if profile_sparsity:
-                    if self.layer_idx == skip_layer_idx - 1:
-                        dataset_x.append(x)
-                    elif self.layer_idx == skip_layer_idx:
-                    # if self.layer_idx == skip_layer_idx:
-                        # dataset_x1.append(activation)
-                        dataset_y.append(activation)
-                        # dataset_y.append(activation)
-                    # elif self.layer_idx == skip_layer_idx + 1:
-                    #     # dataset_x.append(x)
-                    #     dataset_y.append(v)
-                ## 只有当需要记录的layer进来，我才去根据mask稀疏
-                # if self.layer_idx == skip_layer_idx:
-                current_hidden_states = torch.mul(up_result, mask) * torch.mul(activation, mask)
-                # else:
-                #     current_hidden_states = up_result * activation
-                
+                # if profile_sparsity:
+                #     if self.layer_idx == skip_layer_idx:
+                #         dataset_x.append(x)
+                #         dataset_y.append(up_result)
+                      
             down_proj = self.down_proj(current_hidden_states)
 
         # if profile_sparsity:    

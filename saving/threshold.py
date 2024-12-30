@@ -1,23 +1,22 @@
 import torch
 import json
-from modeling_llama_up import step, x_small, x_all
+from modeling_llama_up import step, x_small, x_all, set_profile_mode, maxval
 import os
 import csv
 from utils import get_c4_data, get_model, set_seed
 from tqdm import tqdm
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 ### from path.json read paths of model and dataset
 model_name = "Llama3-8b"
 dataset_name = "c4"
-MAX_LENGTH = 512
 with open('../path.json', 'r') as file:
     paths = json.load(file)
     model_path = paths.get(model_name, '')
     dataset_path = paths.get(dataset_name, '')
-    save_path = paths.get('threshold_path','')
+    save_path = paths.get('threshold_up_path','')
 
-def run_c4(c4data, model, sample_nums = 400):
+def run_c4(c4data, model):
     # 计算评估损失
     total_loss = 0.0
 
@@ -39,26 +38,27 @@ def run_c4(c4data, model, sample_nums = 400):
 set_seed(42)
 c4data = get_c4_data(model_path, dataset_path, sample_num = 400)
 model = get_model(model_path)
+set_profile_mode(mode = False)
 run_c4(c4data, model)
 
 layer_num = 32
 expert_num = 1
-output_file = f'{save_path}/output-c4-llama3-{step}.csv'
+output_file = f'{save_path}/output-channel-{step}.csv'
 
 with open(output_file, mode='w', newline='') as file:
     writer = csv.writer(file)
     col=[]
     for i in range(step):
-        col.append((1.0/step)*(i+1))
+        col.append((maxval/step)*(i+1))
     writer.writerow(col)
 
     for layer in range(0, layer_num):
         for expert in range(expert_num):
             row = []
             if x_all[layer][expert] != 0:
-                row.append("%.4f" % (x_small[layer][expert][0] * 1.0 / x_all[layer][expert]))
+                row.append("%.4f" % (x_small[layer][expert][0] * maxval / x_all[layer][expert]))
                 for i in range(step - 1):
-                    row.append("%.4f" % ((x_small[layer][expert][i + 1] - x_small[layer][expert][i]) * 1.0 / x_all[layer][expert]))
+                    row.append("%.4f" % ((x_small[layer][expert][i + 1] - x_small[layer][expert][i]) / x_all[layer][expert]))
             else:
                 for i in range(step):
                     row.append("%.4f" % 0.0)
@@ -86,9 +86,9 @@ def get_threshold(th = 0.7):
             # print(index, item)
             p += item   ## p 是累加的概率
             if expert_num == 1:
-                t[(mlp-1)] = [(index+0.5)*(1.0/step)]
+                t[(mlp - 1)] = [(index+0.5)*(maxval/step)]
             else:
-                t[(mlp - 1) // expert_num][(mlp - 1) % expert_num] = (index+0.5)*(1.0/step)
+                t[(mlp - 1) // expert_num][(mlp - 1) % expert_num] = (index+0.5)*(maxval/step)
             if p >= th:
                 break
 
@@ -101,5 +101,5 @@ def get_threshold(th = 0.7):
 for th in range(5, 10):
     get_threshold(th * 0.1)
 
-get_threshold(0.95)
+# get_threshold(0.95)
 get_threshold(0)

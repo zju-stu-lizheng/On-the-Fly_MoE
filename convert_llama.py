@@ -1,5 +1,6 @@
 #### convert llama model for sparsity
 import gc
+import csv
 import torch 
 import torch.nn as nn
 
@@ -19,6 +20,29 @@ class SimpleLinearModel(nn.Module):
         return self.linear2(self.linear1(x))
 
 
+def read_csv_to_2d_list(filename):
+    data_2d_list = []
+    with open(filename, 'r') as file:
+        reader = csv.reader(file)
+        for row in reader:
+            # Convert each row from strings to float values
+            float_row = [float(value) for value in row]
+            data_2d_list.append(float_row)
+    return data_2d_list
+
+def set_th_sparsity(sparsity, dataset='c4_llama3'):
+    """
+    Read threshold values based on sparsity level
+    """
+    filename=f"./saving/threshold/{dataset}/th_{sparsity}.csv"
+    th = read_csv_to_2d_list(filename)
+    return th
+
+# gate_th = torch.load('./saving/threshold/chess/thresholds_0_7.pt')["gate_proj_states_thresholds_2"]
+up_th = torch.load('./saving/threshold/chess/up_threshold/thresholds_0_7.pt')["up_proj_states_thresholds_2"]
+
+# th = set_th_sparsity(sparsity=70, dataset='c4_llama3_up')
+
 class Linearlayer(nn.Module):
     """
     sparse linear layer
@@ -26,16 +50,12 @@ class Linearlayer(nn.Module):
     def __init__(self, weight, sparsity=0.1, num=15, name = None):
         super(Linearlayer, self).__init__()
         self.weight = weight.clone().cuda()
-        intermediate_size = weight.size(0)
-        neuron_num = int(intermediate_size * sparsity)
-        self.filtered_W = torch.zeros((neuron_num, weight.size(1))).to(torch.float16).cuda()
         self.layer_idx = num
 
-    def forward(self, x, indices=None):
-        if indices != None:
-            self.filtered_W = self.weight[indices,:]
-            # print(self.filtered_W.shape)
-            true_value = x@self.filtered_W.T
+    def forward(self, x, indices=None, mask=None):
+        if mask != None:
+            ### Should multiply mask after x@w instead of modifying original weight with indices
+            true_value = torch.mul(x@self.weight.T, mask)
         else:
             true_value = x@self.weight.T
             
@@ -163,48 +183,61 @@ class MLPLayer(BaseMLPLayer):
     """
     mlp layer without coreinfer
     """
-    def __init__(self, module, sparsity, num=15, name = None, gamma=0.05):
+    def __init__(self, module, sparsity, num=15, start_num=0, name = None, gamma=0.05):
         super().__init__(num)
         self.act_fn = module.act_fn
         self.intermediate_size = module.up_proj.weight.size(0)  # 14336
         self.hidden_size = module.up_proj.weight.size(1)        # 4096
         self.sparsity = sparsity
         self.hc_nums = int(gamma * self.intermediate_size)
+        self.start_num = start_num
         neuron_num = int(self.intermediate_size * sparsity)
 
         ### new layer converted from nn.linear
         self.gate_proj = Linearlayer(module.gate_proj.weight, sparsity=sparsity, num=num, )
         self.up_proj = Linearlayer(module.up_proj.weight, sparsity=sparsity, num=num, )
         self.down_proj = module.down_proj
-        self.filtered_W_down = torch.zeros((self.hidden_size, neuron_num)).to(torch.float16).cuda()
 
-        if self.num > 0:
-            self.helper = SimpleLinearModel(4096,14336,hidden_dim=1024).cuda()
-            weight = torch.load(f'./output/sparsity/{self.num}-2.pt',map_location=module.down_proj.weight.device)
-            self.helper.load_state_dict(weight)
+        if self.num > start_num:
+            # self.average_gate = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{num}-average.pth')
+            # self.up_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelup/{num}-average.pth')
+            ### saving for self.ratio average value
+            # self.gate_threshold = gate_th[self.num].cuda()
+            self.up_threshold = up_th[self.num].cuda()
+            self.count_sum = 0
+            self.token_sum = 0
 
         del module.gate_proj
         del module.up_proj
+
+    def print_ratio(self):
+        """
+        print the average of self.ratio
+        """ 
+        print(f'layer {self.num} ratio: {self.count_sum/self.token_sum:.4f}')
+        self.count_sum = 0
+        self.token_sum = 0
                 
     def forward(self, x):
-        global pre_x
-        pre_x = x
-        if self.num > 0:
-            ### the final token activation for topk-selection
-            up_mask_index = torch.topk(self.helper(pre_x)[:,-1,:], self.hc_nums).indices.flatten()  # torch.Size([1, 300, 4300])
-            # print(up_mask_index.size())
+        if self.num > self.start_num:
+            ### Multiply complete up projection with gate average
+            up_result = self.up_proj(x)
+            # predicts = torch.abs(torch.mul(up_result, self.average_gate))
+            gate_proj_states = self.act_fn(self.gate_proj(x))
+            ### Threshold method
+            up_proj_states = torch.where(up_result.abs() > self.up_threshold, up_result, 0.0, )
+            # mask = (predicts >= gate_th[self.num]).to(x.dtype) ### 0 because there is only one expert for llama model
+            
+            ### Calculate actual preserved ratio
+            # true_ratio = mask.float().sum().item()  # Calculate proportion of True values
+            ### gate_proj_states 非0的个数
+            true_ratio = (up_proj_states != 0).sum().item()
+            self.count_sum += true_ratio
+            self.token_sum += up_proj_states.numel()
+            
             ### sparsity for up_mask_index
-            true_value = self.act_fn(self.gate_proj(x, up_mask_index)) * self.up_proj(x, up_mask_index)            
-            self.filtered_W_down = self.down_proj.weight[:,up_mask_index]
-            down_value = true_value @ self.filtered_W_down.T
-
-            v = torch.abs(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-            ### calculate recall
-            self.predict_all.append(up_mask_index.size(0))
-            mask_indices = torch.topk(v[:,-1,:], int(self.sparsity * self.intermediate_size)).indices.flatten()
-            overlap_count = torch.isin(mask_indices, up_mask_index).sum().item()
-            self.overlap_clist.append(overlap_count)
-            self.overlap_all.append(int(self.sparsity * self.intermediate_size))
+            true_value = up_proj_states * gate_proj_states         
+            down_value = self.down_proj(true_value) ### No mask here to simplify computation since masked values are 0 anyway
         else:
             true_value = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
             down_value = self.down_proj(true_value)
@@ -217,7 +250,7 @@ def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1,
         if "mlp" in name and name.count('.') == 3:
             # print(name)
             num = int(name.split('.')[2])
-            if num>start_num and num<end_num:
+            if num>=start_num and num<end_num:
                 parent_name = name.rsplit('.', 1)[0] if '.' in name else '' # split from right 1 time
                 attr_name = name.rsplit('.', 1)[-1]
                 if parent_name != '':
@@ -228,7 +261,7 @@ def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1,
                     print(f"Converting Layer {name} with CoreInfer")
                     NewLayer = MLP_Core(module, sparsity, num=num, name = name, alpha=alpha, beta=beta, gamma=gamma, )
                 else:
-                    NewLayer = MLPLayer(module, sparsity, num=num, name = name, gamma=gamma)
+                    NewLayer = MLPLayer(module, sparsity, num=num, name = name, start_num=start_num, gamma=gamma)
                 setattr(parent, attr_name, NewLayer)
                 del module
     
