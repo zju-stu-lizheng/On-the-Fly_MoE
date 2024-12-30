@@ -82,7 +82,7 @@ all_prediction = [0 for _ in range(32)]
 ## 记录专家选择路径
 profile_path = False
 ## 记录动态稀疏数据(use_preexpert:True, 先记录第一层的数据)
-profile_sparsity = True
+profile_sparsity = False
 skip_layer_idx = 1
 dataset_x = [[] for _ in range(8)]  ## 需要按专家分
 dataset_y = [[] for _ in range(8)]
@@ -769,39 +769,11 @@ class MixtralBLockSparseTop2MLP(nn.Module):
     def forward(self, hidden_states, routing_weights, preatt_score=None):
         # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
         activation = self.act_fn(self.w1(hidden_states)) 
-        activation = activation*self.w3(hidden_states)
-        v = torch.abs(activation)
+        self.gate_proj_states = activation.detach().cpu()
+        up_result = self.w3(hidden_states)
+        self.up_proj_states = up_result.detach().cpu()
+        current_hidden_states = activation*up_result
 
-        global th
-        if profile_mode:
-            ## 统计分布
-            global x_all
-            global x_small
-            
-            if profile_x_pos:
-                global x_pos
-                mask = (v >= th[self.layer_idx][self.expert_idx]).to(hidden_states.dtype)
-                nonzero_counts = torch.sum(mask != 0, dim=tuple(range(mask.dim() - 1))).cpu()
-                # print(nonzero_counts.shape) # 14336
-                x_pos[self.layer_idx][self.expert_idx] += nonzero_counts
-            
-            if(self.layer_idx is not None and self.expert_idx is not None):
-                x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
-                for i in range(step):
-                    x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (1.0/step)*(i+1) ).item()
-            current_hidden_states = activation * self.w3(hidden_states)
-        else:
-            mask = (v >= th[self.layer_idx][self.expert_idx]).to(hidden_states.dtype)
-            #### 动态预测数据采集
-            if profile_sparsity and self.layer_idx == skip_layer_idx:
-                dataset_x[self.expert_idx].append(hidden_states)
-                dataset_y[self.expert_idx].append(activation)
-            # if profile_sparsity:
-            #     if self.layer_idx == skip_layer_idx - 1:
-            #         dataset_x[self.expert_idx].append(hidden_states)
-            #     elif self.layer_idx == skip_layer_idx:
-            #         dataset_y[self.expert_idx].append(activation)
-            current_hidden_states = torch.mul(self.w3(hidden_states), mask) * torch.mul(activation, mask)
         current_hidden_states = self.w2(current_hidden_states)
         return routing_weights * current_hidden_states
 
