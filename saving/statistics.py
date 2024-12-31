@@ -130,6 +130,6 @@ thresholds = {'up_proj_states_thresholds': up_proj_states_thresholds, 'up_proj_s
 torch.save(thresholds, f'{save_path}/thresholds.pt')
 
 # %%
-print(thresholds["gate_proj_states_thresholds_2"])
+# print(thresholds["gate_proj_states_thresholds_2"])
 
 

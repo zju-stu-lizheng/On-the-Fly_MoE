@@ -1,7 +1,8 @@
 path.json
 
 ### convert absolute path
-
+lm-evaluation-harness/
 output/
 runs/
 *.pyc
+*.out

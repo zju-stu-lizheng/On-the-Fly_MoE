@@ -2,11 +2,11 @@
 import os
 import json
 import torch
-from transformers import LlamaForCausalLM, AutoTokenizer
-from convert_llama import convert_llama_model
+from transformers import LlamaForCausalLM, AutoTokenizer, MixtralForCausalLM
+from convert_model import convert_llama_model, convert_mixtral_model
 # export HF_ENDPOINT="https://hf-mirror.com"
 os.environ["HF_ENDPOINT"]="https://hf-mirror.com"
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 
 import lm_eval
 from lm_eval.models.huggingface import HFLM
@@ -19,13 +19,20 @@ def _load_model(model_name = "Llama3-8b"):
     with open('path.json', 'r') as file:
         paths = json.load(file)
         model_path = paths.get(model_name, '')
-
-    model = LlamaForCausalLM.from_pretrained(
-        model_path,
-        device_map='auto',
-        use_cache=True,
-        torch_dtype=torch.float16,
-    )
+    if "Llama" in model_name:
+        model = LlamaForCausalLM.from_pretrained(
+            model_path,
+            device_map='auto',
+            use_cache=True,
+            torch_dtype=torch.float16,
+        )
+    else:
+        model = MixtralForCausalLM.from_pretrained(
+            model_path,
+            device_map='auto',
+            use_cache=True,
+            torch_dtype=torch.float16,
+        )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
@@ -44,18 +51,21 @@ def main(task_name_list, model_name, sparsity, start_num, end_num, token_sparsit
     model, tokenizer = _load_model(model_name)
     
     if is_sparsity == True:
-        model = convert_llama_model(model, sparsity, start_num, end_num, token_sparsity, 
-                                    beta=beta, gamma=gamma, use_core=False)
+        if "Llama" in model_name:
+            model = convert_llama_model(model, sparsity, start_num, end_num, token_sparsity, 
+                                        beta=beta, gamma=gamma, use_core=False)
+        else:
+            model = convert_mixtral_model(model, sparsity, start_num, end_num, token_sparsity, 
+                                        beta=beta, gamma=gamma, use_core=False)
 
     evaluate(task_name_list, model, tokenizer, num_fewshot, device)
     for layerid in range(start_num+1,end_num):
-        ### 输出每层稀疏度的平均值
-        model.model.layers[layerid].mlp.print_ratio()
-        # print(f"Layer {layerid} sparsity: {}")
-        # model.model.layers[layerid].mlp.ratio
+        for expertid in range(8):
+            model.model.layers[layerid].block_sparse_moe.experts[expertid].print_ratio()
 
 # triviaqa
-task_list=['boolq','sciq','openbookqa','winogrande','arc_challenge','arc_easy']
+task_list=['winogrande','sciq','openbookqa','arc_challenge','arc_easy']
+# 'boolq',
 # task_list=['truthfulqa_gen','triviaqa_gen']
 num_fewshot = 0
 beta = 0.1
@@ -63,5 +73,5 @@ gammma = 0.3
 start_num = -1
 
 # task_list=['truthfulqa_gen','boolq']
-main(task_name_list=task_list, model_name="Llama3-8b", sparsity=0.1, start_num=start_num, end_num=32, token_sparsity=0.1,
+main(task_name_list=task_list, model_name="mixtral", sparsity=0.1, start_num=start_num, end_num=32, token_sparsity=0.1,
       is_sparsity=True, device='cuda', num_fewshot=num_fewshot, beta=beta, gamma=gammma)
