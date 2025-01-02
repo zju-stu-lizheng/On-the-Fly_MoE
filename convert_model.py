@@ -3,6 +3,7 @@ import gc
 import csv
 import torch 
 import torch.nn as nn
+from torch.nn.parameter import Parameter
 
 class SimpleLinearModel(nn.Module):
     """
@@ -37,7 +38,8 @@ class Linearlayer(nn.Module):
     """
     def __init__(self, weight, sparsity=0.1, num=15, name = None):
         super(Linearlayer, self).__init__()
-        self.weight = weight.clone().to(weight.device)
+        self.weight = Parameter(weight)
+        self.weight.to(weight.device)
         self.layer_idx = num
 
     def forward(self, x, indices=None, mask=None):
@@ -317,9 +319,13 @@ def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1,
     return model
 
 def convert_mixtral_model(model, start_num, end_num, gamma=0.3,):
+    import json
+    with open('../path.json', 'r') as file:
+        paths = json.load(file)
+        threshold_prefix = paths.get('chess_up_threshold', '')
     threshold_path = str(1-gamma).replace('.','_')
     global up_th
-    up_th = load_thresholds(f'./saving/threshold/c4_mixtral_up/thresholds_{threshold_path}.pt')
+    up_th = load_thresholds(f'{threshold_prefix}/thresholds_{threshold_path}.pt')
     for name, module in model.named_modules():
         if "experts" in name and name.count('.') == 5:
             # print(name)

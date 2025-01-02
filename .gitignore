@@ -4,5 +4,6 @@ path.json
 lm-evaluation-harness/
 output/
 runs/
+hqq-master/
 *.pyc
 *.out
