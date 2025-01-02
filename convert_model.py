@@ -19,17 +19,17 @@ class SimpleLinearModel(nn.Module):
     def forward(self, x):
         return self.linear2(self.linear1(x))
 
-def load_thresholds(threshold_path):
+def load_thresholds(threshold_path, use_average=True):
     """
     load thresholds from path
     """
-    thresholds = torch.load(threshold_path)["up_proj_states_thresholds_2"]
+    if use_average:
+        thresholds = torch.load(threshold_path)["up_proj_states_thresholds_2"]
+    else:
+        thresholds = torch.load(threshold_path)["up_proj_states_thresholds"]
     return thresholds
 
-# up_th = None
-up_th = load_thresholds('./saving/threshold/c4_mixtral_up/thresholds_0_8.pt')
-# up_th = load_thresholds('./saving/threshold/chess/up_threshold/thresholds_0_7.pt')
-
+up_th = None
 
 class Linearlayer(nn.Module):
     """
@@ -236,27 +236,21 @@ class MixtralLayer(BaseMLPLayer):
     """
     mlp Mixtral layer without coreinfer
     """
-    def __init__(self, module, sparsity, layernum=15, expertnum=0, start_num=0, name = None, gamma=0.05):
+    def __init__(self, module, layernum=15, expertnum=0, start_num=0, end_num=32):
         ### self.w1: gate, w3: up, w2: down
         super().__init__(layernum)
         self.layernum = layernum
         self.expertnum = expertnum
 
         self.act_fn = module.act_fn
-        self.intermediate_size = module.w3.weight.size(0)  # 14336
-        self.hidden_size = module.w3.weight.size(1)        # 4096
-        self.sparsity = sparsity
-        self.hc_nums = int(gamma * self.intermediate_size)
         self.start_num = start_num
 
         ### new layer converted from nn.linear
-        self.gate_proj = Linearlayer(module.w1.weight, sparsity=sparsity, num=layernum, )
-        self.up_proj = Linearlayer(module.w3.weight, sparsity=sparsity, num=layernum, )
+        self.gate_proj = Linearlayer(module.w1.weight, num=layernum, )
+        self.up_proj = Linearlayer(module.w3.weight, num=layernum, )
         self.down_proj = module.w2
 
         if self.layernum > start_num:
-            # self.average_gate = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelgate/{num}-average.pth')
-            # self.up_average = torch.load(f'/mnt/newdata/lz/sparsity/c4_llama/new_channelup/{num}-average.pth')
             ### saving for self.ratio average value
             self.up_threshold = up_th[self.layernum][self.expertnum].to(module.w1.weight.device)
             self.count_sum = 0
@@ -275,17 +269,12 @@ class MixtralLayer(BaseMLPLayer):
                 
     def forward(self, x):
         if self.num > self.start_num:
-            ### Multiply complete up projection with gate average
             up_result = self.up_proj(x)
-            # predicts = torch.abs(torch.mul(up_result, self.average_gate))
             gate_proj_states = self.act_fn(self.gate_proj(x))
             ### Threshold method
             up_proj_states = torch.where(up_result.abs() > self.up_threshold, up_result, 0.0, )
-            # mask = (predicts >= gate_th[self.num]).to(x.dtype) ### 0 because there is only one expert for llama model
             
             ### Calculate actual preserved ratio
-            # true_ratio = mask.float().sum().item()  # Calculate proportion of True values
-            ### gate_proj_states 非0的个数
             true_ratio = (up_proj_states != 0).sum().item()
             self.count_sum += true_ratio
             self.token_sum += up_proj_states.numel()
@@ -327,10 +316,10 @@ def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1,
     
     return model
 
-def convert_mixtral_model(model, sparsity, start_num, end_num, token_sparsity=0.1, alpha=0.2, beta=0.1, gamma=0.3, sparsity_ratio=0, use_core=True):
-    from tqdm import tqdm
-    # global up_th
-    # up_th = load_thresholds('./saving/threshold/c4_mixtral_up/thresholds.pt')
+def convert_mixtral_model(model, start_num, end_num, gamma=0.3,):
+    threshold_path = str(1-gamma).replace('.','_')
+    global up_th
+    up_th = load_thresholds(f'./saving/threshold/c4_mixtral_up/thresholds_{threshold_path}.pt')
     for name, module in model.named_modules():
         if "experts" in name and name.count('.') == 5:
             # print(name)
@@ -345,7 +334,7 @@ def convert_mixtral_model(model, sparsity, start_num, end_num, token_sparsity=0.
             else:
                 parent = model # for lm_head
 
-            NewLayer = MixtralLayer(module, sparsity=0.1, layernum=layer_num, expertnum=expert_num, name = name, start_num=-1, gamma=0.3)
+            NewLayer = MixtralLayer(module, layernum=layer_num, expertnum=expert_num, start_num=start_num, end_num=end_num)
             setattr(parent, attr_name, NewLayer)
             del module
     
