@@ -4,7 +4,7 @@ import os
 import csv
 from utils import get_model, set_seed
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 ### from path.json read paths of model and dataset
 model_name = "mixtral"
 dataset_name = "c4"
@@ -29,11 +29,11 @@ def get_batch(data, batch_size, block_size):
     return x, y
 
 # %%
-sparsity_level = 0.7
+sparsity_level = 0.8
 # device = 'cuda:1'
 device_2 = 'cpu'
 avg_loss = 0.0
-n_batch = 64
+n_batch = 64 * 4
 # accum_steps = 4 
 accum_steps = 2
 batch_size = 1
@@ -45,8 +45,8 @@ n_experts = len(model.model.layers[0].block_sparse_moe.experts)
 up_proj_states_thresholds = [torch.zeros([n_experts,]) for _ in range(n_layers)]
 gate_proj_states_mean_squares = [[torch.zeros(model.config.intermediate_size) for _ in range(n_experts)] for _ in range(n_layers)]
 
-up_states = [[torch.zeros([accum_steps * batch_size * block_size //2, model.config.intermediate_size]) for _ in range(n_experts)] for _ in range(n_layers)]
-gate_states = [[torch.zeros([accum_steps * batch_size * block_size //2, model.config.intermediate_size]) for _ in range(n_experts)] for _ in range(n_layers)]
+up_states = [[torch.zeros([accum_steps * batch_size * block_size , model.config.intermediate_size]) for _ in range(n_experts)] for _ in range(n_layers)]
+gate_states = [[torch.zeros([accum_steps * batch_size * block_size , model.config.intermediate_size]) for _ in range(n_experts)] for _ in range(n_layers)]
 
 with torch.no_grad():
     for step in range(n_batch // accum_steps):
@@ -127,9 +127,4 @@ for layer_idx in range(n_layers):
 
 thresholds = {'up_proj_states_thresholds': up_proj_states_thresholds, 'up_proj_states_thresholds_2': up_proj_states_thresholds_2}
 
-torch.save(thresholds, f'{save_path}/thresholds.pt')
-
-# %%
-# print(thresholds["gate_proj_states_thresholds_2"])
-
-
+torch.save(thresholds, f'{save_path}/thresholds_0_8.pt')

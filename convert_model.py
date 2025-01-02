@@ -27,7 +27,7 @@ def load_thresholds(threshold_path):
     return thresholds
 
 # up_th = None
-up_th = load_thresholds('./saving/threshold/c4_mixtral_up/thresholds.pt')
+up_th = load_thresholds('./saving/threshold/c4_mixtral_up/thresholds_0_8.pt')
 # up_th = load_thresholds('./saving/threshold/chess/up_threshold/thresholds_0_7.pt')
 
 
