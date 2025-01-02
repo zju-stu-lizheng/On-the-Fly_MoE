@@ -55,8 +55,7 @@ def main(task_name_list, model_name, sparsity, start_num, end_num, token_sparsit
             model = convert_llama_model(model, sparsity, start_num, end_num, token_sparsity, 
                                         beta=beta, gamma=gamma, use_core=False)
         else:
-            model = convert_mixtral_model(model, sparsity, start_num, end_num, token_sparsity, 
-                                        beta=beta, gamma=gamma, use_core=False)
+            convert_mixtral_model(model, start_num=-1, end_num=32, gamma=0.2,)
 
     evaluate(task_name_list, model, tokenizer, num_fewshot, device)
     for layerid in range(start_num+1,end_num):
@@ -69,7 +68,7 @@ task_list=['winogrande','sciq','openbookqa','arc_challenge','arc_easy']
 # task_list=['truthfulqa_gen','triviaqa_gen']
 num_fewshot = 0
 beta = 0.1
-gammma = 0.3
+gammma = 0.2
 start_num = -1
 
 # task_list=['truthfulqa_gen','boolq']
