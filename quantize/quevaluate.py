@@ -3,9 +3,8 @@ import os
 import sys
 sys.path.append('/home/lz/On-the-Fly_MoE_Inference')
 os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
-from transformers import AutoTokenizer, MixtralForCausalLM
-# from modeling_mixtral import MixtralForCausalLM
-from convert_model import convert_mixtral_model
+from transformers import AutoTokenizer
+from modeling_mixtral import MixtralForCausalLM
 import json 
 
 with open('../path.json', 'r') as f:
@@ -42,13 +41,12 @@ quant_config = {
 from hqq.models.hf.base import AutoHQQHFModel
 AutoHQQHFModel.quantize_model(llm, quant_config=quant_config, compute_dtype=torch.float16, device=device_map)
 
+### for test
+for layerid in range(1):
+    for expertid in range(1):
+        llm.model.layers[layerid].block_sparse_moe.experts[expertid].print_ratio()
+
 # Test Model
-import os
-import json
-import torch
-from transformers import AutoTokenizer, MixtralForCausalLM
-from convert_model import convert_llama_model, convert_mixtral_model
-# export HF_ENDPOINT="https://hf-mirror.com"
 os.environ["HF_ENDPOINT"]="https://hf-mirror.com"
 
 import lm_eval
@@ -65,15 +63,11 @@ def evaluate(task_name_list, model, tokenizer, num_fewshot, device):
 
 task_name_list=['winogrande','sciq','openbookqa','arc_challenge','arc_easy']
 num_fewshot = 0
-with open('../path.json', 'r') as file:
-    paths = json.load(file)
-    model_path = paths.get('mixtral', '')
-
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "left"
 
 evaluate(task_name_list, llm, tokenizer, num_fewshot, 'cuda')
+for layerid in range(32):
+    for expertid in range(8):
+        llm.model.layers[layerid].block_sparse_moe.experts[expertid].print_ratio()
 
 # up: 2bit
 # {'arc_easy': {'acc,none': 0.8236531986531986, 'acc_stderr,none': 0.007820313817947478, 'acc_norm,none': 0.8202861952861953, 'acc_norm_stderr,none': 0.007878465068489398, 'alias': 'arc_easy'}, 
@@ -81,3 +75,5 @@ evaluate(task_name_list, llm, tokenizer, num_fewshot, 'cuda')
 # 'openbookqa': {'acc,none': 0.358, 'acc_stderr,none': 0.021461434862859133, 'acc_norm,none': 0.464, 'acc_norm_stderr,none': 0.022324981738385333, 'alias': 'openbookqa'}, 
 # 'sciq': {'acc,none': 0.964, 'acc_stderr,none': 0.00589395781616553, 'acc_norm,none': 0.957, 'acc_norm_stderr,none': 0.006418114379799739, 'alias': 'sciq'}, 
 # 'winogrande': {'acc,none': 0.7426992896606156, 'acc_stderr,none': 0.012285989618865697, 'alias': 'winogrande'}}
+
+# + sparsity

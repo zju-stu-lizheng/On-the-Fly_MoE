@@ -583,22 +583,65 @@ MIXTRAL_ATTENTION_CLASSES = {
     "sdpa": MixtralSdpaAttention,
 }
 
+def load_thresholds(threshold_path, use_average=True):
+    """
+    load thresholds from path
+    """
+    if use_average:
+        thresholds = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds_2"]
+    else:
+        thresholds = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds"]
+    return thresholds
+
+import json
+with open('../path.json', 'r') as f:
+    path = json.load(f)
+    chess_up_threshold = path['chess_up_threshold']
+up_th = load_thresholds(f"{chess_up_threshold}/thresholds_0_8.pt", use_average=True)
 
 class MixtralBlockSparseTop2MLP(nn.Module):
-    def __init__(self, config: MixtralConfig):
+    def __init__(self, config: MixtralConfig, layeridx: int = 0, expertidx: int = 0):
         super().__init__()
+        self.layeridx = layeridx
+        self.expertidx = expertidx
         self.ffn_dim = config.intermediate_size
         self.hidden_dim = config.hidden_size
 
         self.w1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
         self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)
         self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
-
+        self.up_threshold = up_th[self.layeridx][self.expertidx]
+        self.count_sum = 0
+        self.token_sum = 0
         self.act_fn = ACT2FN[config.hidden_act]
+    
+    def print_ratio(self):
+        """
+        print the average of self.ratio
+        """ 
+        if self.token_sum == 0:
+            print("counting start....")
+            print(self.up_threshold.device)
+            return
+        print(f'layer {self.layeridx} expert {self.expertidx} ratio: {self.count_sum/self.token_sum:.4f}')
+        self.count_sum = 0
+        self.token_sum = 0
 
     def forward(self, hidden_states):
-        current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
-        current_hidden_states = self.w2(current_hidden_states)
+        up_result = self.w3(hidden_states)
+        gate_proj_states = self.act_fn(self.w1(hidden_states))
+        # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
+
+        ### Threshold method
+        up_proj_states = torch.where(up_result.abs() > self.up_threshold.to(hidden_states.device), up_result, 0.0, )
+        ### Calculate actual preserved ratio
+        true_ratio = (up_proj_states != 0).sum().item()
+        self.count_sum += true_ratio
+        self.token_sum += up_proj_states.numel()
+        
+        true_value = up_proj_states * gate_proj_states
+
+        current_hidden_states = self.w2(true_value)
         return current_hidden_states
 
 
@@ -614,7 +657,7 @@ class MixtralSparseMoeBlock(nn.Module):
     and memory on padding.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, layeridx: int = 0):
         super().__init__()
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.intermediate_size
@@ -624,7 +667,7 @@ class MixtralSparseMoeBlock(nn.Module):
         # gating
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
 
-        self.experts = nn.ModuleList([MixtralBlockSparseTop2MLP(config) for _ in range(self.num_experts)])
+        self.experts = nn.ModuleList([MixtralBlockSparseTop2MLP(config, layeridx, expertidx=i) for i in range(self.num_experts)])
 
         # Jitter parameters
         self.jitter_noise = config.router_jitter_noise
@@ -678,7 +721,7 @@ class MixtralDecoderLayer(nn.Module):
 
         self.self_attn = MIXTRAL_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
 
-        self.block_sparse_moe = MixtralSparseMoeBlock(config)
+        self.block_sparse_moe = MixtralSparseMoeBlock(config, layeridx=layer_idx)
         self.input_layernorm = MixtralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = MixtralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -715,7 +758,7 @@ class MixtralDecoderLayer(nn.Module):
                 Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
                 into the model
         """
-        print(self.layer_idx, hidden_states.device, self.input_layernorm.weight.device)
+        # print(self.layer_idx, hidden_states.device, self.input_layernorm.weight.device)
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -979,10 +1022,6 @@ class MixtralModel(MixtralPreTrainedModel):
         next_decoder_cache = None
 
         for decoder_layer in self.layers:
-            if decoder_layer.layer_idx == 10:
-                hidden_states = hidden_states.to('cuda:1')
-            elif decoder_layer.layer_idx == 21:
-                hidden_states = hidden_states.to('cuda:2')
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 

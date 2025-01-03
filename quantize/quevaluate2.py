@@ -67,27 +67,27 @@ batch_size = 4
 # dataloader = DataLoader(c4_dataset['validation'], batch_size=batch_size)
 dataloader = DataLoader(top_four_thousand_data, batch_size=batch_size)
 
-# 计算评估损失
-total_loss = 0.0
-num_batches = 0
+# # 计算评估损失
+# total_loss = 0.0
+# num_batches = 0
 
-for batch in tqdm(dataloader):
-    input_ids = batch['input_ids'].to(llm.device)
-    attention_mask = batch['attention_mask'].to(llm.device)
-    labels = batch['labels'].to(llm.device)
+# for batch in tqdm(dataloader):
+#     input_ids = batch['input_ids'].to(llm.device)
+#     attention_mask = batch['attention_mask'].to(llm.device)
+#     labels = batch['labels'].to(llm.device)
     
-    # 禁用梯度计算
-    with torch.no_grad():
-        outputs = llm(input_ids, attention_mask=attention_mask, labels=labels)
-        loss = outputs.loss
-        total_loss += loss.item()
-        num_batches += 1
-        if num_batches % 100 == 0:
-            print(f"[{num_batches}], Eval Loss: {total_loss / (num_batches)}")
+#     # 禁用梯度计算
+#     with torch.no_grad():
+#         outputs = llm(input_ids, attention_mask=attention_mask, labels=labels)
+#         loss = outputs.loss
+#         total_loss += loss.item()
+#         num_batches += 1
+#         if num_batches % 100 == 0:
+#             print(f"[{num_batches}], Eval Loss: {total_loss / (num_batches)}")
 
-# 计算平均损失
-eval_loss = total_loss / num_batches
-print(f"Eval Loss: {eval_loss}")
+# # 计算平均损失
+# eval_loss = total_loss / num_batches
+# print(f"Eval Loss: {eval_loss}")
 
 # %%
 import torch
@@ -171,8 +171,6 @@ def profle_svdllm(name, model, calib_loader, dev):
     return profiling_mat
 profiling_mat=profle_svdllm("mixtral", llm, dataloader, "cuda")
 
-# %% [markdown]
-# ### 量化
 
 # %%
 #Quantize
@@ -186,14 +184,13 @@ quant_config = {
 from hqq.models.hf.base import AutoHQQHFModel
 AutoHQQHFModel.quantize_model(llm, quant_config=quant_config, compute_dtype=torch.float16, device=device_map)
 
-# %%
 class CompensatedModel(torch.nn.Module):
     def __init__(self, model, B_prime, A):
         super(CompensatedModel, self).__init__()
         self.model = model
-        self.B_prime = torch.nn.Parameter(torch.tensor(B_prime).float())
-        self.A = torch.nn.Parameter(torch.tensor(A).float())
-        print(self.A.shape,self.B_prime.shape)
+        self.B_prime = torch.nn.Parameter(torch.tensor(B_prime)).to(torch.float16)
+        self.A = torch.nn.Parameter(torch.tensor(A)).to(torch.float16)
+        # print(self.A.shape,self.B_prime.shape)
     def forward(self, input_ids):
         outputs = self.model(input_ids)
         # 假设在特定层添加残差连接，根据实际模型结构进行修改
@@ -204,11 +201,12 @@ class CompensatedModel(torch.nn.Module):
         return outputs
     
 for i in range(32):
+    print(f"Layer {i} done...")
     for j in range(8):
         llmdevice = llm.model.layers[i].block_sparse_moe.experts[j].w3.device
         Delta_W = llm_base.model.layers[i].block_sparse_moe.experts[j].w3.weight.to(llmdevice) - llm.model.layers[i].block_sparse_moe.experts[j].w3.dequantize()
         Q_prime = profiling_mat[f"model.layers.{i}.block_sparse_moe.experts.{j}.w3"][f"model.layers.{i}.block_sparse_moe.experts.{j}.w3"].cuda().float()
-        Delta_W_prime =  Delta_W.to(torch.float16).to(llmdevice) @ Q_prime.to(torch.float16).to(llmdevice)
+        Delta_W_prime =  Delta_W.to(torch.float32).to(llmdevice) @ Q_prime.to(torch.float32).to(llmdevice)
         llm_base.model.layers[i].block_sparse_moe.experts[j].w3.cpu()
         # 步骤5: 进行SVD分解并取前r个奇异值
         rank = 1024  # 设置 desired rank
@@ -229,6 +227,8 @@ import lm_eval
 from lm_eval.models.huggingface import HFLM
 from lm_eval import evaluator
 del dataloader
+del profiling_mat
+del llm_base
 
 # %%
 def evaluate(task_name_list, model, tokenizer, num_fewshot, device):
@@ -240,10 +240,12 @@ def evaluate(task_name_list, model, tokenizer, num_fewshot, device):
     print(results['results'])
 
 
-
 # triviaqa
 task_list=['winogrande','sciq','openbookqa','arc_challenge','arc_easy']
 evaluate(task_list, llm, tokenizer, 0, "cuda")
 
-
-
+# {'arc_easy': {'acc,none': 0.8345959595959596, 'acc_stderr,none': 0.007623938582125698, 'acc_norm,none': 0.8198653198653199, 'acc_norm_stderr,none': 0.007885661261794779, 'alias': 'arc_easy'}, 
+# 'arc_challenge': {'acc,none': 0.5477815699658704, 'acc_stderr,none': 0.014544519880633822, 'acc_norm,none': 0.5793515358361775, 'acc_norm_stderr,none': 0.01442621125250841, 'alias': 'arc_challenge'}, 
+# 'openbookqa': {'acc,none': 0.338, 'acc_stderr,none': 0.02117566569520941, 'acc_norm,none': 0.462, 'acc_norm_stderr,none': 0.022318338119870527, 'alias': 'openbookqa'}, 
+# 'sciq': {'acc,none': 0.97, 'acc_stderr,none': 0.005397140829099195, 'acc_norm,none': 0.956, 'acc_norm_stderr,none': 0.00648892179842741, 'alias': 'sciq'}, 
+# 'winogrande': {'acc,none': 0.7482241515390686, 'acc_stderr,none': 0.012198489100259778, 'alias': 'winogrande'}}
