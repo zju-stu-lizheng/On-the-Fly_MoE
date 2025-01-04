@@ -1,9 +1,14 @@
 import torch
 import os
 import sys
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
-from transformers import AutoTokenizer, BitsAndBytesConfig, MixtralForCausalLM
-import json
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
+from transformers import AutoTokenizer
+from modeling_mixtral import MixtralForCausalLM, set_profile_mode
+from utils import myevaluate, get_model
+import json 
+
+## 开启稀疏模式
+set_profile_mode(False)
 
 with open('../path.json', 'r') as f:
     path = json.load(f)
@@ -12,19 +17,14 @@ with open('../path.json', 'r') as f:
 with open('./device_map.json', 'r') as f:
     device_map = json.load(f)
 
-llm = MixtralForCausalLM.from_pretrained(
-    model_name,
-    device_map=device_map,
-    use_cache=True,
-    torch_dtype=torch.float16,
-) 
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.pad_token_id = tokenizer.eos_token_id
+llm, tokenizer = get_model(model_name, device_map)
 
 # %%
 from datasets import load_dataset
+import numpy as np
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
 def preprocess_data(batch):
     # 使用 tokenizer 将文本数据转换为模型输入
     inputs = tokenizer(batch['text'], padding="max_length", truncation=True, max_length=512, return_tensors="pt")
@@ -52,46 +52,14 @@ c4_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'lab
 # c4_dataset
 top_four_thousand_data = c4_dataset['validation'].select(range(100))
 
-import numpy as np
-
 def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
-
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 set_seed(42)
 
 # 定义数据加载器
 batch_size = 4
-# dataloader = DataLoader(c4_dataset['validation'], batch_size=batch_size)
 dataloader = DataLoader(top_four_thousand_data, batch_size=batch_size)
-
-# # 计算评估损失
-# total_loss = 0.0
-# num_batches = 0
-
-# for batch in tqdm(dataloader):
-#     input_ids = batch['input_ids'].to(llm.device)
-#     attention_mask = batch['attention_mask'].to(llm.device)
-#     labels = batch['labels'].to(llm.device)
-    
-#     # 禁用梯度计算
-#     with torch.no_grad():
-#         outputs = llm(input_ids, attention_mask=attention_mask, labels=labels)
-#         loss = outputs.loss
-#         total_loss += loss.item()
-#         num_batches += 1
-#         if num_batches % 100 == 0:
-#             print(f"[{num_batches}], Eval Loss: {total_loss / (num_batches)}")
-
-# # 计算平均损失
-# eval_loss = total_loss / num_batches
-# print(f"Eval Loss: {eval_loss}")
-
-# %%
-import torch
-import os
 
 llm_base = MixtralForCausalLM.from_pretrained(
     model_name,
@@ -195,8 +163,10 @@ class CompensatedModel(torch.nn.Module):
         outputs = self.model(input_ids)
         # 假设在特定层添加残差连接，根据实际模型结构进行修改
         # print(self.B_prime.shape,self.A.shape,input_ids.shape)
-        residual = input_ids @ (self.B_prime @ self.A).T
-        outputs += residual
+        # residual = input_ids @ (self.B_prime @ self.A).T
+        # outputs += residual
+        residual = (input_ids @ self.A.T) @ self.B_prime.T
+        torch.add(outputs, residual, out = outputs)
     
         return outputs
     
@@ -223,26 +193,15 @@ for i in range(32):
         llm.model.layers[i].block_sparse_moe.experts[j].w3 = CompensatedModel(llm.model.layers[i].block_sparse_moe.experts[j].w3, B_prime, A).to(llmdevice)
     # compensated_model = CompensatedModel(student.base, B_prime, A).to("cuda")
 
-import lm_eval
-from lm_eval.models.huggingface import HFLM
-from lm_eval import evaluator
+
 del dataloader
 del profiling_mat
 del llm_base
 
-# %%
-def evaluate(task_name_list, model, tokenizer, num_fewshot, device):
-    hflm = HFLM(pretrained=llm, tokenizer=tokenizer)
-    results = evaluator.simple_evaluate(
-    model=hflm,
-    tasks=task_name_list,
-    num_fewshot=num_fewshot)
-    print(results['results'])
 
-
-# triviaqa
-task_list=['winogrande','sciq','openbookqa','arc_challenge','arc_easy']
-evaluate(task_list, llm, tokenizer, 0, "cuda")
+task_name_list=['winogrande','sciq','openbookqa','arc_challenge','arc_easy']
+num_fewshot = 0
+myevaluate(task_name_list, llm, tokenizer, num_fewshot, 'cuda')
 
 # {'arc_easy': {'acc,none': 0.8345959595959596, 'acc_stderr,none': 0.007623938582125698, 'acc_norm,none': 0.8198653198653199, 'acc_norm_stderr,none': 0.007885661261794779, 'alias': 'arc_easy'}, 
 # 'arc_challenge': {'acc,none': 0.5477815699658704, 'acc_stderr,none': 0.014544519880633822, 'acc_norm,none': 0.5793515358361775, 'acc_norm_stderr,none': 0.01442621125250841, 'alias': 'arc_challenge'}, 

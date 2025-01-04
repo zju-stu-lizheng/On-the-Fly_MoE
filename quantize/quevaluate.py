@@ -2,10 +2,13 @@ import torch
 import os
 import sys
 sys.path.append('/home/lz/On-the-Fly_MoE_Inference')
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
-from transformers import AutoTokenizer
-from modeling_mixtral import MixtralForCausalLM
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
+from modeling_mixtral import set_profile_mode
 import json 
+from utils import myevaluate, get_model
+
+## 开启稀疏模式
+set_profile_mode(False)
 
 with open('../path.json', 'r') as f:
     path = json.load(f)
@@ -14,21 +17,7 @@ with open('../path.json', 'r') as f:
 with open('./device_map.json', 'r') as f:
     device_map = json.load(f)
 
-llm = MixtralForCausalLM.from_pretrained(
-    model_name,
-    # device_map='auto',
-    device_map=device_map,
-    use_cache=True,
-    torch_dtype=torch.float16,
-    # attn_implementation="flash_attention_2"
-) 
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.pad_token_id = tokenizer.eos_token_id
-# convert_mixtral_model(llm, start_num=-1, end_num=32, gamma=0.2,)
-# for name, param in llm.named_parameters():
-#     print(name)
+llm, tokenizer = get_model(model_name, device_map)
 
 #Quantize
 from hqq.core.quantize import *
@@ -46,28 +35,10 @@ for layerid in range(1):
     for expertid in range(1):
         llm.model.layers[layerid].block_sparse_moe.experts[expertid].print_ratio()
 
-# Test Model
-os.environ["HF_ENDPOINT"]="https://hf-mirror.com"
-
-import lm_eval
-from lm_eval.models.huggingface import HFLM
-from lm_eval import evaluator
-
-def evaluate(task_name_list, model, tokenizer, num_fewshot, device):
-    hflm = HFLM(pretrained=model, tokenizer=tokenizer)
-    results = evaluator.simple_evaluate(
-    model=hflm,
-    tasks=task_name_list,
-    num_fewshot=num_fewshot)
-    print(results['results'])
 
 task_name_list=['winogrande','sciq','openbookqa','arc_challenge','arc_easy']
 num_fewshot = 0
-
-evaluate(task_name_list, llm, tokenizer, num_fewshot, 'cuda')
-for layerid in range(32):
-    for expertid in range(8):
-        llm.model.layers[layerid].block_sparse_moe.experts[expertid].print_ratio()
+myevaluate(task_name_list, llm, tokenizer, num_fewshot, 'cuda')
 
 # up: 2bit
 # {'arc_easy': {'acc,none': 0.8236531986531986, 'acc_stderr,none': 0.007820313817947478, 'acc_norm,none': 0.8202861952861953, 'acc_norm_stderr,none': 0.007878465068489398, 'alias': 'arc_easy'}, 
@@ -76,4 +47,10 @@ for layerid in range(32):
 # 'sciq': {'acc,none': 0.964, 'acc_stderr,none': 0.00589395781616553, 'acc_norm,none': 0.957, 'acc_norm_stderr,none': 0.006418114379799739, 'alias': 'sciq'}, 
 # 'winogrande': {'acc,none': 0.7426992896606156, 'acc_stderr,none': 0.012285989618865697, 'alias': 'winogrande'}}
 
-# + sparsity
+# + sparsity 25% (大概，用的是之前的稀疏阈值)
+# {'arc_easy': {'acc,none': 0.8055555555555556, 'acc_stderr,none': 0.008121078550852043, 'acc_norm,none': 0.7946127946127947, 'acc_norm_stderr,none': 0.008289582587432948, 'alias': 'arc_easy'}, 
+# 'arc_challenge': {'acc,none': 0.5110921501706485, 'acc_stderr,none': 0.01460779491401306, 'acc_norm,none': 0.5503412969283277, 'acc_norm_stderr,none': 0.014537144444284738, 'alias': 'arc_challenge'}, 
+# 'openbookqa': {'acc,none': 0.33, 'acc_stderr,none': 0.021049612166134803, 'acc_norm,none': 0.474, 'acc_norm_stderr,none': 0.022352791650914163, 'alias': 'openbookqa'}, 
+# 'sciq': {'acc,none': 0.952, 'acc_stderr,none': 0.006763264133666694, 'acc_norm,none': 0.938, 'acc_norm_stderr,none': 0.007629823996280313, 'alias': 'sciq'}, 
+# 'winogrande': {'acc,none': 0.7245461720599842, 'acc_stderr,none': 0.012555690055709525, 'alias': 'winogrande'}}
+
