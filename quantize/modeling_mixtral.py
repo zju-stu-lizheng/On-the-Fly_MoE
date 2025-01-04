@@ -69,6 +69,29 @@ logger = logging.get_logger(__name__)
 _CHECKPOINT_FOR_DOC = "mistralai/Mixtral-8x7B-v0.1"
 _CONFIG_FOR_DOC = "MixtralConfig"
 
+profile_threshold = True
+
+def set_profile_mode(mode):
+    global profile_threshold
+    profile_threshold = mode
+    print(f"Set profile_threshold to {mode}")
+
+def load_thresholds(threshold_path, use_average=True):
+    """
+    load thresholds from path
+    """
+    if use_average:
+        thresholds = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds_2"]
+    else:
+        thresholds = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds"]
+    return thresholds
+
+import json
+with open('../path.json', 'r') as f:
+    path = json.load(f)
+    chess_up_threshold = path['chess_up_sparsity_threshold']
+up_th = load_thresholds(f"{chess_up_threshold}/thresholds_0_8.pt", use_average=True)
+
 
 def load_balancing_loss_func(
     gate_logits: Union[torch.Tensor, Tuple[torch.Tensor], None],
@@ -583,22 +606,6 @@ MIXTRAL_ATTENTION_CLASSES = {
     "sdpa": MixtralSdpaAttention,
 }
 
-def load_thresholds(threshold_path, use_average=True):
-    """
-    load thresholds from path
-    """
-    if use_average:
-        thresholds = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds_2"]
-    else:
-        thresholds = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds"]
-    return thresholds
-
-import json
-with open('../path.json', 'r') as f:
-    path = json.load(f)
-    chess_up_threshold = path['chess_up_threshold']
-up_th = load_thresholds(f"{chess_up_threshold}/thresholds_0_8.pt", use_average=True)
-
 class MixtralBlockSparseTop2MLP(nn.Module):
     def __init__(self, config: MixtralConfig, layeridx: int = 0, expertidx: int = 0):
         super().__init__()
@@ -631,13 +638,17 @@ class MixtralBlockSparseTop2MLP(nn.Module):
         up_result = self.w3(hidden_states)
         gate_proj_states = self.act_fn(self.w1(hidden_states))
         # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
-
-        ### Threshold method
-        up_proj_states = torch.where(up_result.abs() > self.up_threshold.to(hidden_states.device), up_result, 0.0, )
-        ### Calculate actual preserved ratio
-        true_ratio = (up_proj_states != 0).sum().item()
-        self.count_sum += true_ratio
-        self.token_sum += up_proj_states.numel()
+        if profile_threshold:
+            self.gate_proj_states = gate_proj_states.detach().cpu()
+            self.up_proj_states = up_result.detach().cpu()
+            up_proj_states = up_result
+        else:
+            ### Threshold method
+            up_proj_states = torch.where(up_result.abs() > self.up_threshold.to(hidden_states.device), up_result, 0.0, )
+            ### Calculate actual preserved ratio
+            true_ratio = (up_proj_states != 0).sum().item()
+            self.count_sum += true_ratio
+            self.token_sum += up_proj_states.numel()
         
         true_value = up_proj_states * gate_proj_states
 
