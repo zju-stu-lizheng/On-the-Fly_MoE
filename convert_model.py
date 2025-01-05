@@ -318,14 +318,14 @@ def convert_llama_model(model, sparsity, start_num, end_num, token_sparsity=0.1,
     
     return model
 
-def convert_mixtral_model(model, start_num, end_num, gamma=0.3,):
+def convert_mixtral_model(model, start_num, end_num, gamma=0.3, use_average=True):
     import json
-    with open('../path.json', 'r') as file:
+    with open('/home/lz/On-the-Fly_MoE_Inference/path.json', 'r') as file:
         paths = json.load(file)
         threshold_prefix = paths.get('chess_up_threshold', '')
     threshold_path = str(1-gamma).replace('.','_')
     global up_th
-    up_th = load_thresholds(f'{threshold_prefix}/thresholds_{threshold_path}.pt')
+    up_th = load_thresholds(f'{threshold_prefix}/thresholds_{threshold_path}.pt', use_average=use_average)
     for name, module in model.named_modules():
         if "experts" in name and name.count('.') == 5:
             # print(name)

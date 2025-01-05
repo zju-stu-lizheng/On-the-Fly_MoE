@@ -5,7 +5,7 @@ import torch
 from transformers import LlamaForCausalLM, AutoTokenizer, MixtralForCausalLM
 from convert_model import convert_llama_model, convert_mixtral_model
 # export HF_ENDPOINT="https://hf-mirror.com"
-os.environ["HF_ENDPOINT"]="https://hf-mirror.com"
+# os.environ["HF_ENDPOINT"]="https://hf-mirror.com"
 os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 
 import lm_eval
@@ -16,7 +16,7 @@ from lm_eval import evaluator
 def _load_model(model_name = "Llama3-8b"):
     print(f"Loading model {model_name}")
     ### from path.json read paths of model and dataset
-    with open('path.json', 'r') as file:
+    with open('/home/lz/On-the-Fly_MoE_Inference/path.json', 'r') as file:
         paths = json.load(file)
         model_path = paths.get(model_name, '')
     if "Llama" in model_name:
@@ -47,7 +47,8 @@ def evaluate(task_name_list, model, tokenizer, num_fewshot, device):
     print(results['results'])
 
 
-def main(task_name_list, model_name, sparsity, start_num, end_num, token_sparsity, is_sparsity, device, num_fewshot, beta=0.1, gamma=0.3):
+def main(task_name_list, model_name, sparsity, start_num, end_num, token_sparsity, is_sparsity, 
+         device, num_fewshot, beta=0.1, gamma=0.3, use_average=True):
     model, tokenizer = _load_model(model_name)
     
     if is_sparsity == True:
@@ -55,7 +56,7 @@ def main(task_name_list, model_name, sparsity, start_num, end_num, token_sparsit
             model = convert_llama_model(model, sparsity, start_num, end_num, token_sparsity, 
                                         beta=beta, gamma=gamma, use_core=False)
         else:
-            convert_mixtral_model(model, start_num=-1, end_num=32, gamma=0.2,)
+            convert_mixtral_model(model, start_num=-1, end_num=32, gamma=gamma, use_average=use_average)
 
     evaluate(task_name_list, model, tokenizer, num_fewshot, device)
     for layerid in range(start_num+1,end_num):
@@ -68,9 +69,17 @@ task_list=['winogrande','sciq','openbookqa','arc_challenge','arc_easy']
 # task_list=['truthfulqa_gen','triviaqa_gen']
 num_fewshot = 0
 beta = 0.1
-gammma = 0.2
+gammma = 0.1
 start_num = -1
+
+### 从命令行读取参数 use_average, 出现 --use_average 则为True
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--use_average", action='store_true')
+args = parser.parse_args()
+use_average = args.use_average
+print('use_average: ', use_average)
 
 # task_list=['truthfulqa_gen','boolq']
 main(task_name_list=task_list, model_name="mixtral", sparsity=0.1, start_num=start_num, end_num=32, token_sparsity=0.1,
-      is_sparsity=True, device='cuda', num_fewshot=num_fewshot, beta=beta, gamma=gammma)
+      is_sparsity=True, device='cuda', num_fewshot=num_fewshot, beta=beta, gamma=gammma, use_average=use_average)
