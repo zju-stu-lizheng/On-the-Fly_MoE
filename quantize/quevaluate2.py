@@ -19,126 +19,6 @@ with open('./device_map.json', 'r') as f:
 
 llm, tokenizer = get_model(model_name, device_map)
 
-# %%
-from datasets import load_dataset
-import numpy as np
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-
-def preprocess_data(batch):
-    # 使用 tokenizer 将文本数据转换为模型输入
-    inputs = tokenizer(batch['text'], padding="max_length", truncation=True, max_length=512, return_tensors="pt")
-    inputs["labels"] = inputs.input_ids.clone()
-    return inputs
-
-# 定义一个函数来选择特征并丢弃不需要的
-def select_features(example):
-    return {
-        'input_ids': example['input_ids'],
-        'attention_mask': example['attention_mask'],
-        'labels': example['labels']
-    }
-
-tokenizer.pad_token = tokenizer.eos_token
-# # 加载 C4 数据集的验证集
-with open('../path.json', 'r') as file:
-    paths = json.load(file)
-    c4_path = paths.get('c4', '')
-c4 = load_dataset(c4_path)
-# 对数据集进行预处理
-c4_dataset = c4.map(preprocess_data, batched=True)
-# c4_dataset = c4_dataset.map(select_features, batched=True)
-c4_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
-# c4_dataset
-top_four_thousand_data = c4_dataset['validation'].select(range(100))
-
-def set_seed(seed):
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-set_seed(42)
-
-# 定义数据加载器
-batch_size = 4
-dataloader = DataLoader(top_four_thousand_data, batch_size=batch_size)
-
-llm_base = MixtralForCausalLM.from_pretrained(
-    model_name,
-    device_map='cpu',
-    use_cache=True,
-    torch_dtype=torch.float16,
-    # attn_implementation="flash_attention_2"
-) 
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.pad_token_id = tokenizer.eos_token_id
-
-# %%
-def profle_svdllm(name, model, calib_loader, dev):
-    # model.to(dev)
-    if "llama" in name or "mixtral" in name or "vicuna" in name:
-        layers = model.model.layers
-    print("Start obtaining the whitening matrix...")
-    def hook(module, input, output):
-        inp = input[0].detach().float()
-        if inp.dim() == 2:   # for opt
-            inp = inp.unsqueeze(0)
-        adds = torch.matmul(inp.transpose(1,2), inp)
-        adds_sum = torch.sum(adds, dim=0)
-        module.raw_scaling_diag_matrix += adds_sum
-        del inp, adds, adds_sum
-        torch.cuda.empty_cache()
-    for name, module in model.named_modules():
-        if "w3" in name:
-            # print(name)
-            module.raw_scaling_diag_matrix = 0
-            module.register_forward_hook(hook)
-            
-    for batch in tqdm(calib_loader):
-        inputs = batch['input_ids'].to(llm.device)
-        model(inputs)
-    for name, module in model.named_modules():
-        if "w3" in name:
-            module._forward_hooks.clear()
-            # print(module.raw_scaling_diag_matrix)
-    torch.cuda.empty_cache()
-
-    profiling_mat = {}
-    print("Start Cholesky Decomposition...")
-    
-    layer_profile = {}
-    for name, module in model.named_modules():
-        if "w3" in name:
-            covariance = module.raw_scaling_diag_matrix.double().to(dev)
-            if not torch.allclose(covariance, covariance.t(), atol=1e-6):
-                raise ValueError("Covariance matrix is not symmetric.")
-                    # Perform eigen decomposition
-            Lambda, Q = torch.linalg.eigh(covariance, UPLO='U')
-            if torch.isnan(Lambda).any() or torch.isinf(Lambda).any():
-                raise ValueError("Lambda contains NaN or Inf values.")
-
-            # 检查 Lambda 是否包含负值
-            if (Lambda < 0).any():
-                print("Lambda contains negative values. Clamping to zero.")
-                eigenvalues = torch.linalg.eigvalsh(covariance)
-                covariance += (- eigenvalues[0] + 2e-6) * torch.eye(covariance.shape[0]).cuda()
-                Lambda, Q = torch.linalg.eigh(covariance, UPLO='U')
-                print(f"Lambda min: {Lambda.min().item()}, Lambda max: {Lambda.max().item()}")
-            # 现在进行平方根操作
-            Lambda_diag = torch.diag(torch.sqrt(Lambda))
-            # Sort eigenvalues and eigenvectors in descending order
-            indices = torch.argsort(Lambda, descending=True)
-            Lambda = Lambda[indices]
-            Q = Q[:, indices]
-
-            # Compute Q_prime = Q * sqrt(Lambda)
-            Lambda_diag = torch.diag(torch.sqrt(Lambda))
-            Q_prime = torch.matmul(Q, Lambda_diag)
-            layer_profile[name] = Q_prime.cpu()
-            profiling_mat[name] = layer_profile
-    return profiling_mat
-profiling_mat=profle_svdllm("mixtral", llm, dataloader, "cuda")
-
 
 # %%
 #Quantize
@@ -153,51 +33,28 @@ from hqq.models.hf.base import AutoHQQHFModel
 AutoHQQHFModel.quantize_model(llm, quant_config=quant_config, compute_dtype=torch.float16, device=device_map)
 
 class CompensatedModel(torch.nn.Module):
-    def __init__(self, model, B_prime, A):
+    def __init__(self, model, path, layerid, expertid):
         super(CompensatedModel, self).__init__()
         self.model = model
-        self.B_prime = torch.nn.Parameter(torch.tensor(B_prime)).to(torch.float16)
-        self.A = torch.nn.Parameter(torch.tensor(A)).to(torch.float16)
-        # print(self.A.shape,self.B_prime.shape)
+        ### self.A and self.B_prime are initialized as the values loaded from the file
+        self.A = torch.load(path + f'A_{layerid}_{expertid}.pt').to(torch.float16)
+        self.B_prime = torch.load(path + f'B_prime_{layerid}_{expertid}.pt').to(torch.float16)
+        
+
     def forward(self, input_ids):
         outputs = self.model(input_ids)
-        # 假设在特定层添加残差连接，根据实际模型结构进行修改
-        # print(self.B_prime.shape,self.A.shape,input_ids.shape)
-        # residual = input_ids @ (self.B_prime @ self.A).T
-        # outputs += residual
         residual = (input_ids @ self.A.T) @ self.B_prime.T
         torch.add(outputs, residual, out = outputs)
     
         return outputs
-    
+
 for i in range(32):
     print(f"Layer {i} done...")
     for j in range(8):
         llmdevice = llm.model.layers[i].block_sparse_moe.experts[j].w3.device
-        Delta_W = llm_base.model.layers[i].block_sparse_moe.experts[j].w3.weight.to(llmdevice) - llm.model.layers[i].block_sparse_moe.experts[j].w3.dequantize()
-        Q_prime = profiling_mat[f"model.layers.{i}.block_sparse_moe.experts.{j}.w3"][f"model.layers.{i}.block_sparse_moe.experts.{j}.w3"].cuda().float()
-        Delta_W_prime =  Delta_W.to(torch.float32).to(llmdevice) @ Q_prime.to(torch.float32).to(llmdevice)
-        llm_base.model.layers[i].block_sparse_moe.experts[j].w3.cpu()
-        # 步骤5: 进行SVD分解并取前r个奇异值
-        rank = 1024  # 设置 desired rank
-        U_prime, Sigma_prime, V_prime = torch.linalg.svd(Delta_W_prime, full_matrices=False)
-        U_prime = U_prime[:, :rank]
-        Sigma_prime = Sigma_prime[:rank]
-        V_prime = V_prime[:rank, :]
-
-        B_prime = U_prime @ torch.diag(Sigma_prime)
-        A_prime = V_prime
-
-        # 步骤6: 投影回原空间
-        A = A_prime.to(llmdevice) @ torch.linalg.inv(Q_prime).to(llmdevice)
-        llm.model.layers[i].block_sparse_moe.experts[j].w3 = CompensatedModel(llm.model.layers[i].block_sparse_moe.experts[j].w3, B_prime, A).to(llmdevice)
-    # compensated_model = CompensatedModel(student.base, B_prime, A).to("cuda")
-
-
-del dataloader
-del profiling_mat
-del llm_base
-
+        llm.model.layers[i].block_sparse_moe.experts[j].w3 = \
+        CompensatedModel(llm.model.layers[i].block_sparse_moe.experts[j].w3, './saved/', layerid=i, expertid=j).to(llmdevice)
+        
 
 task_name_list=['winogrande','sciq','openbookqa','arc_challenge','arc_easy']
 num_fewshot = 0
