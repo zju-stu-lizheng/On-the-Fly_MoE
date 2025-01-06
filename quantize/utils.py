@@ -10,12 +10,12 @@ import lm_eval
 from lm_eval.models.huggingface import HFLM
 from lm_eval import evaluator
 
-def get_model(model_name, device_map):
+def get_model(model_name, device_map, dtype=torch.bfloat16):
     llm = MixtralForCausalLM.from_pretrained(
         model_name,
         device_map=device_map,
         use_cache=True,
-        torch_dtype=torch.float16,
+        torch_dtype=dtype,
     ) 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
