@@ -322,7 +322,7 @@ def convert_mixtral_model(model, start_num, end_num, gamma=0.3, use_average=True
     import json
     with open('/home/lz/On-the-Fly_MoE_Inference/path.json', 'r') as file:
         paths = json.load(file)
-        threshold_prefix = paths.get('chess_up_threshold', '')
+        threshold_prefix = paths.get('c4_mixtral_sparsity_path', '')
     threshold_path = str(1-gamma).replace('.','_')
     global up_th
     up_th = load_thresholds(f'{threshold_prefix}/thresholds_{threshold_path}.pt', use_average=use_average)

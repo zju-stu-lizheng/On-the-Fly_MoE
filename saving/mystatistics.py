@@ -12,7 +12,7 @@ with open('../path.json', 'r') as file:
     paths = json.load(file)
     model_path = paths.get(model_name, '')
     dataset_path = paths.get(dataset_name, '')
-    save_path = paths.get('chess_up_threshold','')
+    save_path = paths.get('c4_mixtral_sparsity_path','')
     print('model path:', model_path, '\ndataset path:', dataset_path, '\nsave path:', save_path)
 
 set_seed(42)
