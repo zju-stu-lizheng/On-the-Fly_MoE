@@ -33,7 +33,7 @@ def doeval(dtype, lora_save_path):
 		for j in range(8):
 			llmdevice = llm.model.layers[i].block_sparse_moe.experts[j].w3.device
 			llm.model.layers[i].block_sparse_moe.experts[j].w3 = \
-			CompensatedModel(llm.model.layers[i].block_sparse_moe.experts[j].w3, '/home/lz/On-the-Fly_MoE_Inference/quantize/saved/eora/', layerid=i, expertid=j, dtype=dtype).to(llmdevice)
+			CompensatedModel(llm.model.layers[i].block_sparse_moe.experts[j].w3, '/home/lz/On-the-Fly_MoE_Inference/quantize/saved/eora/', layerid=i, expertid=j, dtype=dtype, device=llmdevice).to(llmdevice)
 
 
 	PeftUtils.load_lora_weights(llm, lora_save_path)
