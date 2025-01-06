@@ -10,6 +10,20 @@ import lm_eval
 from lm_eval.models.huggingface import HFLM
 from lm_eval import evaluator
 
+class CompensatedModel(torch.nn.Module):
+    def __init__(self, model, path, layerid, expertid, dtype=torch.float16, device='cuda:0'):
+        super(CompensatedModel, self).__init__()
+        self.model = model
+        ### self.A and self.B_prime are initialized as the values loaded from the file
+        self.A = torch.load(path + f'A_{layerid}_{expertid}.pt', map_location='cuda:0').to(dtype).to(device)
+        self.B_prime = torch.load(path + f'B_prime_{layerid}_{expertid}.pt', map_location='cuda:0').to(dtype).to(device)
+        
+    def forward(self, input_ids):
+        outputs = self.model(input_ids)
+        residual = (input_ids @ self.A.T) @ self.B_prime.T
+        outputs += residual
+        return outputs
+
 def get_model(model_name, device_map, dtype=torch.bfloat16):
     llm = MixtralForCausalLM.from_pretrained(
         model_name,

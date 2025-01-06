@@ -29,29 +29,15 @@ from hqq.models.hf.base import AutoHQQHFModel
 AutoHQQHFModel.quantize_model(llm, quant_config=quant_config, compute_dtype=torch.float16, device=device_map)
 
 import torch
+from utils import CompensatedModel
 
-class CompensatedModel(torch.nn.Module):
-    def __init__(self, model, path, layerid, expertid):
-        super(CompensatedModel, self).__init__()
-        self.model = model
-        ### self.A and self.B_prime are initialized as the values loaded from the file
-        self.A = torch.load(path + f'A_{layerid}_{expertid}.pt').to(torch.float16)
-        self.B_prime = torch.load(path + f'B_prime_{layerid}_{expertid}.pt').to(torch.float16)
-        
-
-    def forward(self, input_ids):
-        outputs = self.model(input_ids)
-        residual = (input_ids @ self.A.T) @ self.B_prime.T
-        torch.add(outputs, residual, out = outputs)
-    
-        return outputs
 
 for i in range(32):
     print(f"Layer {i} done...")
     for j in range(8):
         llmdevice = llm.model.layers[i].block_sparse_moe.experts[j].w3.device
         llm.model.layers[i].block_sparse_moe.experts[j].w3 = \
-        CompensatedModel(llm.model.layers[i].block_sparse_moe.experts[j].w3, '/home/lz/On-the-Fly_MoE_Inference/quantize/saved/', layerid=i, expertid=j).to(llmdevice)
+        CompensatedModel(llm.model.layers[i].block_sparse_moe.experts[j].w3, '/home/lz/On-the-Fly_MoE_Inference/quantize/saved/', layerid=i, expertid=j, dtype=torch.float16).to(llmdevice)
 
 import torch
 import numpy as np
