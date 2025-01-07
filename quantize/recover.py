@@ -11,6 +11,7 @@ from hqq.models.hf.base import AutoHQQHFModel
 from hqq.core.peft import PeftUtils
 from datasets import load_dataset, Dataset
 import functools
+import tensorboard
 
 
 # # 加载 C4 数据集的验证集
@@ -145,15 +146,15 @@ args = TrainingArguments(
     gradient_accumulation_steps=1,
     gradient_checkpointing=False,   ### 先设置成False
     group_by_length=False,
-    logging_steps=save_steps,
-    eval_steps=save_steps,
+    logging_steps=20,
+    eval_steps=20,
     save_strategy="steps",
     save_only_model=True,
     save_steps=save_steps,
     save_total_limit=save_total_limit,
     disable_tqdm=False,
     report_to='tensorboard',
-    logging_dir='/home/lz/On-the-Fly_MoE_Inference/quantize/saved/logs/'
+    logging_dir=f'{model_save_path}/logs/'
 )
 
 trainer = CustomTrainer(
