@@ -12,11 +12,14 @@ import lm_eval
 from lm_eval.models.huggingface import HFLM
 from lm_eval import evaluator
 
-def get_lora_params(dtype):
+def get_lora_params(dtype, test=False):
     ### lora_params for the model
     base_lora_params = {'lora_type':'default', 'r':128, 'lora_alpha':128, 'dropout':0.05, 'train_dtype':dtype}
 
-    lora_params      = {'self_attn.q_proj': base_lora_params,
+    if test:
+        lora_params      = {'block_sparse_moe.experts.w3'   : base_lora_params}
+    else:
+        lora_params      = {'self_attn.q_proj': base_lora_params,
                     'self_attn.k_proj': base_lora_params,
                     'self_attn.v_proj': base_lora_params,
                     'self_attn.o_proj': base_lora_params,

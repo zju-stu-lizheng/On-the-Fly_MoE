@@ -4,6 +4,7 @@ path.json
 lm-evaluation-harness/
 output/
 runs/
+triton/
 hqq-master/
 *.pyc
 *.out

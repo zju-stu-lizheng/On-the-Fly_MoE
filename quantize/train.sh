@@ -1,1 +1,1 @@
-CUDA_VISIBLE_DEVICES=4,5,6 python recover.py --model_save_path '/home/lz/On-the-Fly_MoE_Inference/quantize/saved/training/test' --epoch 2 --training_steps 300
+python recover.py --model_save_path '/home/lz/On-the-Fly_MoE_Inference/quantize/saved/training/test' --epoch 2 --training_steps 3000

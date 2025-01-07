@@ -22,7 +22,7 @@ import tensorboard
 
 def get_peft_model(model_name, dtype, device_map, threshold_path):
 	set_profile_mode(False)
-	load_thresholds(f'{threshold_path}/thresholds_0_8.pt')
+	load_thresholds(f'{threshold_path}/thresholds_0_8.pt', use_average=False)
 	print('using ',dtype)
 	llm, tokenizer = get_model(model_name, device_map, dtype=dtype)
 
@@ -32,7 +32,8 @@ def get_peft_model(model_name, dtype, device_map, threshold_path):
 	quant_config      = {'block_sparse_moe.experts.w3'   : q3_config}
 	AutoHQQHFModel.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)
 
-	lora_params = get_lora_params(dtype)
+	lora_params = get_lora_params(dtype, test=True)
+	print(lora_params)
 	PeftUtils.add_lora(llm, lora_params)
 
 	for i in range(32):
