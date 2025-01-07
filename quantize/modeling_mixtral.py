@@ -76,22 +76,19 @@ def set_profile_mode(mode):
     profile_threshold = mode
     print(f"Set profile_threshold to {mode}")
 
+up_th = None
 def load_thresholds(threshold_path, use_average=True):
     """
     load thresholds from path
     """
+    # f"{chess_up_threshold}/thresholds_0_8.pt"
+    global up_th
     if use_average:
-        thresholds = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds_2"]
+        up_th = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds_2"]
     else:
-        thresholds = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds"]
-    return thresholds
-
-import json
-with open('../path.json', 'r') as f:
-    path = json.load(f)
-    chess_up_threshold = path['chess_up_sparsity_threshold']
-up_th = load_thresholds(f"{chess_up_threshold}/thresholds_0_8.pt", use_average=True)
-
+        up_th = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds"]
+    print(f"Thresholds loaded from {threshold_path}")
+    # return thresholds
 
 def load_balancing_loss_func(
     gate_logits: Union[torch.Tensor, Tuple[torch.Tensor], None],

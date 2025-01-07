@@ -3,34 +3,38 @@ import os
 import sys
 os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
 import transformers
-from transformers import AutoTokenizer, BitsAndBytesConfig
-from modeling_mixtral import MixtralForCausalLM, set_profile_mode
+from modeling_mixtral import set_profile_mode, load_thresholds
 import json
-from utils import get_model
+from utils import get_model, CompensatedModel
+from hqq.core.quantize import *
+from hqq.models.hf.base import AutoHQQHFModel
+from hqq.core.peft import PeftUtils
+from datasets import load_dataset, Dataset
+import functools
+
 
 # # 加载 C4 数据集的验证集
 with open('../path.json', 'r') as file:
     paths = json.load(file)
     fineweb_path = paths.get('fineweb', '')
     model_name = paths.get('mixtral','')
+    threshold_path = paths.get('chess_up_sparsity_threshold','')
 
 with open('./device_map.json', 'r') as f:
     device_map = json.load(f)
 
 set_profile_mode(False)
+load_thresholds(f'{threshold_path}/thresholds_0_8.pt')
 dtype = torch.bfloat16
 print('using ',dtype)
 llm, tokenizer = get_model(model_name, device_map, dtype=dtype)
-from hqq.core.quantize import *
+
 q4_config    = BaseQuantizeConfig(nbits=8, group_size=64) 
 q3_config    = BaseQuantizeConfig(nbits=2, group_size=64)
 
 quant_config      = {'block_sparse_moe.experts.w3'   : q3_config}
-from hqq.models.hf.base import AutoHQQHFModel
 AutoHQQHFModel.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)
 
-
-from hqq.core.peft import PeftUtils
 base_lora_params = {'lora_type':'default', 'r':128, 'lora_alpha':128, 'dropout':0.05, 'train_dtype':dtype}
 
 lora_params      = {'self_attn.q_proj': base_lora_params,
@@ -38,6 +42,7 @@ lora_params      = {'self_attn.q_proj': base_lora_params,
                     'self_attn.v_proj': base_lora_params,
                     'self_attn.o_proj': base_lora_params,
                     'block_sparse_moe.experts.w1'   : base_lora_params,
+                    'block_sparse_moe.experts.w3'   : base_lora_params,
                     'block_sparse_moe.experts.w2'   : base_lora_params}
 
 
@@ -48,12 +53,10 @@ for i in range(32):
     if i == 31:
         print(f"Layer {i} done...")
     for j in range(8):
-        llmdevice = llm.model.layers[i].block_sparse_moe.experts[j].w3.device
-        llm.model.layers[i].block_sparse_moe.experts[j].w3 = \
-        CompensatedModel(llm.model.layers[i].block_sparse_moe.experts[j].w3, '/home/lz/On-the-Fly_MoE_Inference/quantize/saved/eora/', layerid=i, expertid=j, device=llmdevice)
+        llmdevice = llm.model.layers[i].block_sparse_moe.experts[j].w3.linear_layer.device
+        llm.model.layers[i].block_sparse_moe.experts[j].w3.linear_layer = \
+        CompensatedModel(llm.model.layers[i].block_sparse_moe.experts[j].w3.linear_layer, '/home/lz/On-the-Fly_MoE_Inference/quantize/saved/eora/', layerid=i, expertid=j, device=llmdevice)
 
-from datasets import load_dataset, Dataset, concatenate_datasets
-import functools
 
 def preprocess_data(batch, tokenizer):
     # 使用 tokenizer 将文本数据转换为模型输入
@@ -120,11 +123,11 @@ class CustomTrainer(transformers.Trainer):
         if self.tokenizer is not None:
             self.tokenizer.save_pretrained(output_dir)
 
-model_save_path='./saved/training/more'
+model_save_path='./saved/training/less_new'
 learning_rate = 1e-4
 micro_batch_size=8
 epochs = 2
-save_steps = 500
+save_steps = 300
 save_total_limit = 6
 sample_num = len(new_train_data)
 optimizer=AdamW(filter(lambda p : p.requires_grad, llm.parameters()),lr=learning_rate)
@@ -142,8 +145,8 @@ args = TrainingArguments(
     gradient_accumulation_steps=1,
     gradient_checkpointing=False,   ### 先设置成False
     group_by_length=False,
-    logging_steps=500,
-    eval_steps=500,
+    logging_steps=save_steps,
+    eval_steps=save_steps,
     save_strategy="steps",
     save_only_model=True,
     save_steps=save_steps,
@@ -155,8 +158,8 @@ args = TrainingArguments(
 
 trainer = CustomTrainer(
     model=llm,
-    train_dataset=new_train_data.select(range(10000)),
-    eval_dataset=new_test_data.select(range(1000)),
+    train_dataset=new_train_data.select(range(3000)),
+    eval_dataset=new_test_data.select(range(300)),
     args=args,
     optimizers=(optimizer, linear_scheduler),
     data_collator=DataCollatorForSeq2Seq(
