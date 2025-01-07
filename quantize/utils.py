@@ -2,6 +2,8 @@ import os
 import torch
 from modeling_mixtral import MixtralForCausalLM
 from transformers import AutoTokenizer
+import transformers
+from hqq.core.peft import PeftUtils
 
 # Test Model
 os.environ["HF_ENDPOINT"]="https://hf-mirror.com"
@@ -9,6 +11,41 @@ os.environ["HF_ENDPOINT"]="https://hf-mirror.com"
 import lm_eval
 from lm_eval.models.huggingface import HFLM
 from lm_eval import evaluator
+
+def get_lora_params(dtype):
+    ### lora_params for the model
+    base_lora_params = {'lora_type':'default', 'r':128, 'lora_alpha':128, 'dropout':0.05, 'train_dtype':dtype}
+
+    lora_params      = {'self_attn.q_proj': base_lora_params,
+                    'self_attn.k_proj': base_lora_params,
+                    'self_attn.v_proj': base_lora_params,
+                    'self_attn.o_proj': base_lora_params,
+                    'block_sparse_moe.experts.w1'   : base_lora_params,
+                    'block_sparse_moe.experts.w3'   : base_lora_params,
+                    'block_sparse_moe.experts.w2'   : base_lora_params}
+    return lora_params
+
+class CustomTrainer(transformers.Trainer):
+    def save_model(self, output_dir=None, _internal_call=False):
+        # 如果没有指定output_dir，则使用训练参数中的输出目录
+        if output_dir is None:
+            output_dir = self.args.output_dir #这里的args不是该脚本的输入，而是TrainerArgs
+
+        # 确保输出目录存在
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 保存完整的模型参数
+        # torch.save(self.model.state_dict(), os.path.join(output_dir, 'pytorch_model.bin'))
+        
+        # PeftUtils.cast_lora_weights(self.model, dtype=torch.bfloat16)
+
+        #Save LoRA weights
+        PeftUtils.save_lora_weights(self.model, output_dir+'_lora_combine.pt')
+
+        # 保存配置文件和tokenizer
+        self.model.config.save_pretrained(output_dir)
+        if self.tokenizer is not None:
+            self.tokenizer.save_pretrained(output_dir)
 
 class CompensatedModel(torch.nn.Module):
     def __init__(self, model, path, layerid, expertid, dtype=torch.float16, device='cuda:0'):
