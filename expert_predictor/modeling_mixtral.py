@@ -677,6 +677,9 @@ class MixtralSparseMoeBlock(nn.Module):
 
         self.experts = nn.ModuleList([MixtralBlockSparseTop2MLP(config, layeridx, expertidx=i) for i in range(self.num_experts)])
 
+        self.activations = []
+        self.gate_logits = []
+
         # Jitter parameters
         self.jitter_noise = config.router_jitter_noise
 
@@ -689,8 +692,8 @@ class MixtralSparseMoeBlock(nn.Module):
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
 
-        # global activation
-        # global expert
+        self.activations.extend([h for h in hidden_states])
+        self.gate_logits.extend([g for g in router_logits])
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
