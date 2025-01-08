@@ -92,7 +92,11 @@ def evaluate(task_name_list, model, tokenizer, num_fewshot, device):
 def myevaluate(task_name_list, model, tokenizer, num_fewshot, device):
     model.eval()
     evaluate(task_name_list, model, tokenizer, num_fewshot, device)
+    avg_list = []
     for layerid in range(32):
         for expertid in range(8):
-            model.model.layers[layerid].block_sparse_moe.experts[expertid].print_ratio()
-
+            avg_list.append(model.model.layers[layerid].block_sparse_moe.experts[expertid].get_ratio())
+    
+    print('Average Sparsity: ', f'{sum(avg_list)/len(avg_list):.4f}')
+    print('Max Sparsity: {:.4f}'.format(max(avg_list)))
+    print('Min Sparsity: {:.4f}'.format(min(avg_list)))

@@ -630,6 +630,16 @@ class MixtralBlockSparseTop2MLP(nn.Module):
         print(f'layer {self.layeridx} expert {self.expertidx} ratio: {self.count_sum/self.token_sum:.4f}')
         self.count_sum = 0
         self.token_sum = 0
+    
+    def get_ratio(self) -> float:
+        """
+        print the average of self.ratio
+        """ 
+        if self.token_sum == 0:
+            print("counting start....")
+            print(self.up_threshold.device)
+            return
+        return self.count_sum/self.token_sum
 
     def forward(self, hidden_states):
         up_result = self.w3(hidden_states)

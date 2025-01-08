@@ -20,10 +20,10 @@ from transformers import (
 import argparse
 import tensorboard
 
-def get_peft_model(model_name, dtype, device_map, threshold_path, sparsity_level=0.8):
+def get_peft_model(model_name, dtype, device_map, threshold_path, sparsity_level=0.8, use_average=True):
 	set_profile_mode(False)
 	filepath = str(sparsity_level).replace('.', '_')
-	load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=False)
+	load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=use_average)
 	print('using ',dtype)
 	llm, tokenizer = get_model(model_name, device_map, dtype=dtype)
 
@@ -85,6 +85,7 @@ def dotrain(dtype, args, save_steps = 300):
 	model_save_path = args.model_save_path
 	epochs = args.epoch
 	training_steps = args.training_steps
+	use_average = args.use_average
 
 	# # 加载 C4 数据集的验证集
 	with open('../path.json', 'r') as file:
@@ -96,7 +97,7 @@ def dotrain(dtype, args, save_steps = 300):
 	with open('./device_map.json', 'r') as f:
 		device_map = json.load(f)
 	### get peft model for training
-	llm, tokenizer = get_peft_model(model_name, dtype, device_map, threshold_path, args.sparsity_level)
+	llm, tokenizer = get_peft_model(model_name, dtype, device_map, threshold_path, args.sparsity_level, use_average=use_average)
 	new_train_data, new_test_data = get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42)
 
 	# model_save_path='./saved/training/less_new'
@@ -149,6 +150,7 @@ def dotrain(dtype, args, save_steps = 300):
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--model_save_path", type=str, default='./saved/training/less_new')
+	parser.add_argument("--use_average", action='store_true')
 	parser.add_argument("--epoch", type=int, default=2)
 	parser.add_argument("--sparsity_level", type=float, default=0.8)
 	parser.add_argument("--training_steps", type=int, default=3000, help='the number of sentences from datasets(3000-10000)')
