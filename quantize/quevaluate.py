@@ -31,8 +31,6 @@ def doeval(dtype, lora_save_path, args):
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--lora_path", type=str, default='./saved/training/lora_weights.pt')
-	# parser.add_argument("--task_name_list", type=str, default=['arc_challenge'])
-	#### 解析一个task_name_list， 可以读入多个task_name，最后合成一个list
 	parser.add_argument('--task_name_list', nargs='+')
 	parser.add_argument("--threshold_path", type=str, default='training_sparsity_path')
 	parser.add_argument("--use_average", action='store_true', help='use average threshold')
