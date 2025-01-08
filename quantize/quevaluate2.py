@@ -1,6 +1,6 @@
 import torch
 from modeling_mixtral import set_profile_mode, load_thresholds
-from utils import myevaluate, get_model, CompensatedModel, lora_params
+from utils import myevaluate, get_model, CompensatedModel, get_lora_params
 import json 
 import argparse
 from hqq.core.quantize import *
@@ -18,7 +18,7 @@ def doeval(dtype, lora_save_path, threshold_path_name):
 	
 	## 开启稀疏模式
 	set_profile_mode(False)
-	load_thresholds(f'{threshold_path}/thresholds_0_8.pt')
+	load_thresholds(f'{threshold_path}/thresholds_0_8.pt', use_average=False)
 	llm, tokenizer = get_model(model_name, device_map, dtype=dtype)
 
 	q4_config    = BaseQuantizeConfig(nbits=8, group_size=64) 
@@ -29,6 +29,8 @@ def doeval(dtype, lora_save_path, threshold_path_name):
 	}
 	AutoHQQHFModel.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)  
 
+	lora_params = get_lora_params(dtype, test=False)
+	print(lora_params)
 	PeftUtils.add_lora(llm, lora_params)
 	PeftUtils.load_lora_weights(llm, lora_save_path)
 	#### 加载量化后的权重, w3: lora+eora

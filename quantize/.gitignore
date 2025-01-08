@@ -1,4 +1,5 @@
 saved/
 run.sh
 run_2.sh
+*.sh
 device_map_1.json

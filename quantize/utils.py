@@ -40,10 +40,14 @@ class CustomTrainer(transformers.Trainer):
         # 保存完整的模型参数
         # torch.save(self.model.state_dict(), os.path.join(output_dir, 'pytorch_model.bin'))
         
-        # PeftUtils.cast_lora_weights(self.model, dtype=torch.bfloat16)
+        self.model.eval()
+        PeftUtils.cast_lora_weights(self.model, dtype=torch.float16)
 
         #Save LoRA weights
         PeftUtils.save_lora_weights(self.model, output_dir+'_lora_combine.pt')
+
+        PeftUtils.cast_lora_weights(self.model, dtype=torch.bfloat16)
+        self.model.train()
 
         # 保存配置文件和tokenizer
         self.model.config.save_pretrained(output_dir)
@@ -86,6 +90,7 @@ def evaluate(task_name_list, model, tokenizer, num_fewshot, device):
     print(results['results'])
 
 def myevaluate(task_name_list, model, tokenizer, num_fewshot, device):
+    model.eval()
     evaluate(task_name_list, model, tokenizer, num_fewshot, device)
     for layerid in range(32):
         for expertid in range(8):

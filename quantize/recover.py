@@ -1,13 +1,13 @@
 import torch
 import os
 import sys
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
 import transformers
 from modeling_mixtral import set_profile_mode, load_thresholds
 import json
 from utils import get_model, CompensatedModel, get_lora_params, CustomTrainer
 from hqq.core.quantize import *
-from hqq.models.hf.base import AutoHQQHFModel
+# from hqq.models.hf.base import AutoHQQHFModel
+from hqq.models.hf.mixtral import MixtralHQQ
 from hqq.core.peft import PeftUtils
 from datasets import load_dataset, Dataset
 import functools
@@ -20,9 +20,10 @@ from transformers import (
 import argparse
 import tensorboard
 
-def get_peft_model(model_name, dtype, device_map, threshold_path):
+def get_peft_model(model_name, dtype, device_map, threshold_path, sparsity_level=0.8):
 	set_profile_mode(False)
-	load_thresholds(f'{threshold_path}/thresholds_0_8.pt', use_average=False)
+	filepath = str(sparsity_level).replace('.', '_')
+	load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=False)
 	print('using ',dtype)
 	llm, tokenizer = get_model(model_name, device_map, dtype=dtype)
 
@@ -30,9 +31,9 @@ def get_peft_model(model_name, dtype, device_map, threshold_path):
 	q3_config    = BaseQuantizeConfig(nbits=2, group_size=64)
 
 	quant_config      = {'block_sparse_moe.experts.w3'   : q3_config}
-	AutoHQQHFModel.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)
+	MixtralHQQ.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)
 
-	lora_params = get_lora_params(dtype, test=True)
+	lora_params = get_lora_params(dtype, test=False)
 	print(lora_params)
 	PeftUtils.add_lora(llm, lora_params)
 
@@ -55,8 +56,8 @@ def preprocess_data(batch, tokenizer):
 def get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42):
 	openmath = load_dataset("/home/lz/web-math/",data_files="/home/lz/web-math/openmath1.json")
 	fineweb = load_dataset(fineweb_path)
-	openmath_text = openmath['train']['text'][:4000] 
-	fineweb_text = fineweb['train']['text'][:10000]
+	openmath_text = openmath['train']['text'][:8000] 
+	fineweb_text = fineweb['train']['text'][:30000]
 
 	combined_text = openmath_text + fineweb_text
 	combined_dataset = Dataset.from_dict({"text": combined_text})
@@ -80,7 +81,7 @@ def get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42):
 	return new_train_data, new_test_data
 
 
-def dotrain(dtype, args):
+def dotrain(dtype, args, save_steps = 300):
 	model_save_path = args.model_save_path
 	epochs = args.epoch
 	training_steps = args.training_steps
@@ -95,14 +96,13 @@ def dotrain(dtype, args):
 	with open('./device_map.json', 'r') as f:
 		device_map = json.load(f)
 	### get peft model for training
-	llm, tokenizer = get_peft_model(model_name, dtype, device_map, threshold_path)
+	llm, tokenizer = get_peft_model(model_name, dtype, device_map, threshold_path, args.sparsity_level)
 	new_train_data, new_test_data = get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42)
 
 	# model_save_path='./saved/training/less_new'
 	learning_rate = 1e-4
 	micro_batch_size=8
 	# epochs = 2
-	save_steps = 300
 	save_total_limit = 6
 	sample_num = len(new_train_data)
 	optimizer=AdamW(filter(lambda p : p.requires_grad, llm.parameters()),lr=learning_rate)
@@ -150,10 +150,11 @@ if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--model_save_path", type=str, default='./saved/training/less_new')
 	parser.add_argument("--epoch", type=int, default=2)
+	parser.add_argument("--sparsity_level", type=float, default=0.8)
 	parser.add_argument("--training_steps", type=int, default=3000, help='the number of sentences from datasets(3000-10000)')
 
 	args = parser.parse_args()
 
 	dtype = torch.bfloat16
 	print('model_save_path: ', args.model_save_path, dtype)
-	dotrain(dtype, args)
+	dotrain(dtype, args, save_steps = 300)
