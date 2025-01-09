@@ -18,11 +18,15 @@ def doeval(dtype, lora_save_path, args):
 	
 	## 开启稀疏模式
 	set_profile_mode(False)
-	load_thresholds(f'{threshold_path}/thresholds_0_8.pt', use_average=use_average)	
+	filepath = str(args.sparsity_level).replace('.', '_')
+	load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=use_average)
 	llm, tokenizer = get_model(model_name, device_map, dtype=dtype)
 
 	if lora_save_path != './saved/training/lora_weights.pt':
+		print('load lora model')
 		PeftModelForCausalLM.from_pretrained(llm, lora_save_path, 'default')
+	else:
+		print('not loading lora model')
 			
 	# task_name_list=['arc_challenge']
 	task_name_list = args.task_name_list
@@ -35,6 +39,7 @@ if __name__ == '__main__':
 	parser.add_argument('--task_name_list', nargs='+')
 	parser.add_argument("--threshold_path", type=str, default='training_sparsity_path')
 	parser.add_argument("--use_average", action='store_true', help='use average threshold')
+	parser.add_argument("--sparsity_level", type=float, default=0.8)
 	args = parser.parse_args()
 	lora_save_path = args.lora_path
 	dtype = torch.float16
