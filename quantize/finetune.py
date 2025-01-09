@@ -22,7 +22,7 @@ def get_model_for_training(model_name, dtype, device_map, threshold_path, sparsi
 	print('using ',dtype)
 	model, tokenizer = get_model(model_name, device_map, dtype=dtype)
 
-	target_modules = ["w1", "w2", "w3", "q_proj", "k_proj",]
+	target_modules = ["w1", "w2", "w3", "q_proj", "k_proj", "v_proj", "o_proj"]
 	peft_config = LoraConfig(
 			lora_alpha=32,
 			lora_dropout=0.01,
