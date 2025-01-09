@@ -85,6 +85,30 @@ def get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42):
 	return new_train_data, new_test_data
 
 
+def get_bagel_dataset(bagel_path, tokenizer, test_num = 0.1, seed = 42):
+	bagel = load_dataset("json", data_files=bagel_path)
+	bagel = bagel['train']['text'][:15000] 
+	combined_dataset = Dataset.from_dict({"text": bagel})
+
+	combined_train = combined_dataset.train_test_split(test_size=test_num, seed=seed)
+	train_data = combined_train['train']
+	test_data = combined_train['test']
+
+	new_train_data = train_data.map(
+		functools.partial(
+		preprocess_data,
+		tokenizer=tokenizer
+	), batched=True)
+	new_test_data = test_data.map(
+		functools.partial(
+		preprocess_data,
+		tokenizer=tokenizer
+	), batched=True)
+	new_train_data.shuffle(seed)
+	new_test_data.shuffle(seed)
+
+	return new_train_data, new_test_data
+
 def dotrain(dtype, args, save_steps = 300):
 	model_save_path = args.model_save_path
 	epochs = args.epoch
@@ -97,13 +121,15 @@ def dotrain(dtype, args, save_steps = 300):
 		fineweb_path = paths.get('fineweb', '')
 		model_name = paths.get('mixtral','')
 		threshold_path = paths.get('chess_up_threshold','')
+		bagel_path = paths.get("bagel_json","")
 
 	with open('./device_map.json', 'r') as f:
 		device_map = json.load(f)
+
 	### get peft model for training
 	llm, tokenizer = get_model_for_training(model_name, dtype, device_map, threshold_path, args.sparsity_level, use_average=use_average)
-	new_train_data, new_test_data = get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42)
-
+	# new_train_data, new_test_data = get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42)
+	new_train_data, new_test_data = get_bagel_dataset(bagel_path, tokenizer)
 	# model_save_path='./saved/training/less_new'
 	learning_rate = 1e-4
 	micro_batch_size=8

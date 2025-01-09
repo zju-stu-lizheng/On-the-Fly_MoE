@@ -29,7 +29,10 @@ def doeval(dtype, lora_save_path, args):
 
 	if lora_save_path != './saved/training/lora_weights.pt':
 		print('load lora model')
-		PeftModelForCausalLM.from_pretrained(llm, lora_save_path, 'default')
+		llm = PeftModelForCausalLM.from_pretrained(llm, lora_save_path, 'default')
+		# 合并 LoRA 权重进行推理
+		llm = llm.merge_and_unload()
+		print('merge done')
 	else:
 		print('not loading lora model')
 			

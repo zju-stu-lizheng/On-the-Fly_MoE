@@ -656,10 +656,7 @@ class MixtralBlockSparseTop2MLP(nn.Module):
             up_proj_states = up_result
         else:
             ### Threshold method
-            if self.up_threshold == 0:
-                up_proj_states = up_result
-            else:
-                up_proj_states = torch.where(up_result.abs() > self.up_threshold.to(hidden_states.device), up_result, 0.0, )
+            up_proj_states = torch.where(up_result.abs() > self.up_threshold.to(hidden_states.device), up_result, 0.0, )
             ### Calculate actual preserved ratio
             true_ratio = (up_proj_states != 0).sum().item()
             self.count_sum += true_ratio

@@ -1,4 +1,5 @@
 path.json
+download.sh
 
 ### convert absolute path
 lm-evaluation-harness/
@@ -6,5 +7,6 @@ output/
 runs/
 triton/
 hqq-master/
+bagel-v0.5/
 *.pyc
 *.out
