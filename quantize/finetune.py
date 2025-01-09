@@ -14,11 +14,16 @@ from transformers import (
 import argparse
 import tensorboard
 from peft import LoraConfig, get_peft_model
+import math
 
 def get_model_for_training(model_name, dtype, device_map, threshold_path, sparsity_level=0.8, use_average=True):
 	set_profile_mode(False)
 	filepath = str(sparsity_level).replace('.', '_')
-	load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=use_average)
+	if math.fabs(args.sparsity_level - 0) < 1e-5:
+		print('use zero sparsity')
+		load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=use_average, zero=True)
+	else:
+		load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=use_average)
 	print('using ',dtype)
 	model, tokenizer = get_model(model_name, device_map, dtype=dtype)
 

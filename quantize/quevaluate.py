@@ -1,4 +1,5 @@
 import torch
+import math
 from modeling_mixtral import set_profile_mode, load_thresholds
 from utils import myevaluate, get_model
 import json 
@@ -19,7 +20,11 @@ def doeval(dtype, lora_save_path, args):
 	## 开启稀疏模式
 	set_profile_mode(False)
 	filepath = str(args.sparsity_level).replace('.', '_')
-	load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=use_average)
+	if math.fabs(args.sparsity_level - 0) < 1e-5:
+		print('use zero sparsity')
+		load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=use_average, zero=True)
+	else:
+		load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=use_average,)
 	llm, tokenizer = get_model(model_name, device_map, dtype=dtype)
 
 	if lora_save_path != './saved/training/lora_weights.pt':
