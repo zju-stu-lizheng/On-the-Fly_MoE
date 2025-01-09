@@ -21,7 +21,8 @@ def doeval(dtype, lora_save_path, args):
 	load_thresholds(f'{threshold_path}/thresholds_0_8.pt', use_average=use_average)	
 	llm, tokenizer = get_model(model_name, device_map, dtype=dtype)
 
-	PeftModelForCausalLM.from_pretrained(llm, lora_save_path, 'default')
+	if lora_save_path != './saved/training/lora_weights.pt':
+		PeftModelForCausalLM.from_pretrained(llm, lora_save_path, 'default')
 			
 	# task_name_list=['arc_challenge']
 	task_name_list = args.task_name_list

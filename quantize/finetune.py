@@ -22,7 +22,7 @@ def get_model_for_training(model_name, dtype, device_map, threshold_path, sparsi
 	print('using ',dtype)
 	model, tokenizer = get_model(model_name, device_map, dtype=dtype)
 
-	target_modules = ["w1", "w2", "w3", "q_proj", "k_proj",]
+	target_modules = ["w1", "w2", "w3", "q_proj", "k_proj", "v_proj", "o_proj"]
 	peft_config = LoraConfig(
 			lora_alpha=32,
 			lora_dropout=0.01,
@@ -47,10 +47,15 @@ def preprocess_data(batch, tokenizer):
 
 ### get openmath and fineweb dataset
 def get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42):
-	openmath = load_dataset("/home/lz/web-math/",data_files="/home/lz/web-math/openmath1.json")
+	if fineweb_path.endswith("parquet"):
+		openmath = load_dataset("parquet",data_files="/home/bcds/venv/dilab/floe/dataset/open-web-math/data/train-00045-of-00114-dae3a4ce38fbb868.parquet")
+		#55397
+		fineweb = load_dataset("parquet",data_files=fineweb_path) #726000
+	else:
+		openmath = load_dataset("/home/lz/web-math/",data_files="/home/lz/web-math/openmath1.json")
+		fineweb = load_dataset(fineweb_path)
 	openmath_text = openmath['train']['text'][:8000] 
-	fineweb = load_dataset(fineweb_path)
-	fineweb_text = fineweb['train']['text'][:35000]
+	fineweb_text = fineweb['train']['text'][:35000] 
 
 	# combined_text = fineweb_text
 	combined_text = openmath_text + fineweb_text
@@ -153,4 +158,4 @@ if __name__ == '__main__':
 
 	dtype = torch.bfloat16
 	print('model_save_path: ', args.model_save_path, dtype)
-	dotrain(dtype, args, save_steps = 400)
+	dotrain(dtype, args, save_steps = 600)
