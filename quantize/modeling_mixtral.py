@@ -619,7 +619,7 @@ class MixtralBlockSparseTop2MLP(nn.Module):
         self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)
         self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
         if not profile_threshold:
-            self.up_threshold = up_th[self.layeridx][self.expertidx]
+            self.up_threshold = torch.tensor(up_th[self.layeridx][self.expertidx])
         self.count_sum = 0
         self.token_sum = 0
         self.act_fn = ACT2FN[config.hidden_act]
