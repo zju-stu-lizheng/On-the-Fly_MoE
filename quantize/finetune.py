@@ -85,10 +85,18 @@ def get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42):
 	return new_train_data, new_test_data
 
 
-def get_bagel_dataset(bagel_path, tokenizer, test_num = 0.1, seed = 42):
-	bagel = load_dataset("json", data_files=bagel_path)
-	bagel = bagel['train']['text'][:15000] 
-	combined_dataset = Dataset.from_dict({"text": bagel})
+def get_bagel_dataset(sft_path, fineweb_path, tokenizer, test_num = 0.1, seed = 42, merge=False):
+	bagel = load_dataset("json", data_files=sft_path)
+	bagel_text = bagel['train']['text'][:15000] 
+	combined_text = bagel_text 
+
+	if merge:
+		print("merge datasets with", fineweb_path)
+		fineweb = load_dataset("parquet",data_files=fineweb_path)
+		fineweb_text = fineweb['train']['text'][:15000] 
+		combined_text = bagel_text + fineweb_text 
+
+	combined_dataset = Dataset.from_dict({"text": combined_text})
 
 	combined_train = combined_dataset.train_test_split(test_size=test_num, seed=seed)
 	train_data = combined_train['train']
@@ -122,6 +130,7 @@ def dotrain(dtype, args, save_steps = 300):
 		model_name = paths.get('mixtral','')
 		threshold_path = paths.get('chess_up_threshold','')
 		bagel_path = paths.get("bagel_json","")
+		openhermes_path = paths.get("openhermes","")
 
 	with open('./device_map.json', 'r') as f:
 		device_map = json.load(f)
@@ -129,7 +138,7 @@ def dotrain(dtype, args, save_steps = 300):
 	### get peft model for training
 	llm, tokenizer = get_model_for_training(model_name, dtype, device_map, threshold_path, args.sparsity_level, use_average=use_average)
 	# new_train_data, new_test_data = get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42)
-	new_train_data, new_test_data = get_bagel_dataset(bagel_path, tokenizer)
+	new_train_data, new_test_data = get_bagel_dataset(openhermes_path, fineweb_path, tokenizer, merge=args.merge)
 	# model_save_path='./saved/training/less_new'
 	learning_rate = 1e-4
 	micro_batch_size=8
@@ -141,8 +150,6 @@ def dotrain(dtype, args, save_steps = 300):
 	training_args = TrainingArguments(
 		output_dir=model_save_path,
 		num_train_epochs=epochs,
-		# max_steps=opt.max_steps,
-		# fp16=True,
 		bf16=True,
 		optim="adamw_torch",# paged_adamw_8bit
 		learning_rate=learning_rate,
@@ -181,6 +188,7 @@ if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--model_save_path", type=str, default='./saved/training/less_new')
 	parser.add_argument("--use_average", action='store_true')
+	parser.add_argument("--merge", action='store_true', help='merge dataset in training')
 	parser.add_argument("--epoch", type=int, default=2)
 	parser.add_argument("--sparsity_level", type=float, default=0.8)
 	parser.add_argument("--training_steps", type=int, default=3000, help='the number of sentences from datasets(3000-10000)')
@@ -188,5 +196,5 @@ if __name__ == '__main__':
 	args = parser.parse_args()
 
 	dtype = torch.bfloat16
-	print('model_save_path: ', args.model_save_path, dtype)
+	print(args)
 	dotrain(dtype, args, save_steps = 600)
