@@ -5,7 +5,9 @@
 
 ### 代码结构
 
-* quevaluate2.py： 用于测试模型在下游任务的性能
+* quevaluate.py： 用于测试模型在下游任务的性能
 * modeling_mixtral.py/: 加载MLP稀疏化的模型
-* recover.py: LoRA微调的代码
+* finetune.py: LoRA微调的代码
 * threshold.py: 统计稀疏阈值的代码
+
+quevaluate2.py 和 recover.py 是用于HQQ量化后训练和测试的代码，但是效果不太对?

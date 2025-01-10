@@ -8,5 +8,6 @@ runs/
 triton/
 hqq-master/
 bagel-v0.5/
+OpenHermes-2.5/
 *.pyc
 *.out
