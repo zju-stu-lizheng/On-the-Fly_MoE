@@ -92,7 +92,8 @@ def get_bagel_dataset(sft_path, fineweb_path, tokenizer, test_num = 0.1, seed = 
 
 	if merge:
 		print("merge datasets with", fineweb_path)
-		fineweb = load_dataset("parquet",data_files=fineweb_path)
+		filetype = fineweb_path.split(".")[-1]
+		fineweb = load_dataset(filetype, data_files=fineweb_path)
 		fineweb_text = fineweb['train']['text'][:15000] 
 		combined_text = bagel_text + fineweb_text 
 
@@ -138,7 +139,7 @@ def dotrain(dtype, args, save_steps = 300):
 	### get peft model for training
 	llm, tokenizer = get_model_for_training(model_name, dtype, device_map, threshold_path, args.sparsity_level, use_average=use_average)
 	# new_train_data, new_test_data = get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42)
-	new_train_data, new_test_data = get_bagel_dataset(openhermes_path, fineweb_path, tokenizer, merge=args.merge)
+	new_train_data, new_test_data = get_bagel_dataset(bagel_path, fineweb_path, tokenizer, merge=args.merge)
 	# model_save_path='./saved/training/less_new'
 	learning_rate = 1e-4
 	micro_batch_size=8
