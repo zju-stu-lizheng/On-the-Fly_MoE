@@ -197,12 +197,73 @@ class PipelineLLM:
         buffer.load_expert_weights(expert_weights)
         # 异步加载参数
         buffer.load_from_cpu(cpu_mlp, cpu_mlp_expert1, stream)
-
+    
     def _replace_forward_methods(self):
         """
         替换模型每一层的 forward 方法，添加参数预加载逻辑和注意力计算。
         """
         for i, layer in enumerate(self.llm.model.layers):
+            def new_prefill_forward(hidden_states: torch.Tensor,
+                        attention_mask: Optional[torch.Tensor] = None,
+                        position_ids: Optional[torch.LongTensor] = None,
+                        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+                        output_attentions: Optional[bool] = False,
+                        output_router_logits: Optional[bool] = False,
+                        use_cache: Optional[bool] = False,
+                        cache_position: Optional[torch.LongTensor] = None):
+                """
+                Prefill阶段的forward方法，处理seq_length > 1的情况
+                """
+                # Self Attention
+                residual = hidden_states
+                hidden_states = layer.input_layernorm(hidden_states)
+                hidden_states, self_attn_weights, present_key_value = layer.self_attn(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                )
+                hidden_states = residual + hidden_states
+
+                # Fully Connected
+                residual = hidden_states
+                hidden_states = layer.post_attention_layernorm(hidden_states)
+                
+                # 对于prefill阶段，仅将experts加载到GPU计算
+                batch_size, sequence_length, hidden_dim = hidden_states.shape
+                hidden_states = hidden_states.view(-1, hidden_dim)
+                
+                # 获取当前层的experts
+                experts = layer.block_sparse_moe.experts
+                
+                # 将experts移动到GPU
+                for expert in experts:
+                    expert.to('cuda')
+                
+                # 在GPU上进行MoE计算（gate保持在CPU）
+                final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
+                
+                # 将计算结果reshape回原始形状
+                final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+                
+                # 计算完成后将experts移回CPU
+                for expert in experts:
+                    expert.to('cpu')
+                
+                hidden_states = residual + final_hidden_states
+
+                outputs = (hidden_states,)
+                if output_attentions:
+                    outputs += (self_attn_weights,)
+                if use_cache:
+                    outputs += (present_key_value,)
+                if output_router_logits:
+                    outputs += (router_logits,)
+                    
+                return outputs
             def new_forward(hidden_states: torch.Tensor,
                             attention_mask: Optional[torch.Tensor] = None,
                             position_ids: Optional[torch.LongTensor] = None,
@@ -303,8 +364,17 @@ class PipelineLLM:
                         outputs += (present_key_value,)
 
                     return outputs
-            # 替换 forward 方法
-            layer.forward = new_forward
+
+            # 根据seq_length选择使用prefill还是decode forward
+            def combined_forward(hidden_states: torch.Tensor, *args, **kwargs):
+                batch_size, seq_len, _ = hidden_states.shape
+                if seq_len > 1:  # prefill阶段
+                    return new_prefill_forward(hidden_states, *args, **kwargs)
+                else:  # decode阶段
+                    return new_forward(hidden_states, *args, **kwargs)
+                
+            # 替换forward方法
+            layer.forward = combined_forward
 
 # # 将模型转换为使用CachedMLP的版本
 # llm, cached_mlps = convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.8)
