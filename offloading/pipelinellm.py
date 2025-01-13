@@ -167,15 +167,18 @@ class PipelineLLM:
         self.stream1 = torch.cuda.Stream()
 
         # 初始化加载第一个和第二个层的参数
-        self._load_layer(1, buffer_index=0,expert_ids=torch.tensor([0,1]))
-        self._load_layer(1, buffer_index=1,expert_ids=torch.tensor([0,1]))
+        self._load_layer(1, buffer_index=0, expert_ids=torch.tensor([0, 1]))
+        self._load_layer(1, buffer_index=1, expert_ids=torch.tensor([0, 1]))
         self.top_k = 2
         self.activation = nn.SiLU()
 
         self._replace_forward_methods()
-    
-    def _load_layer(self, layer_idx, buffer_index, 
-                    expert_ids, expert_weights=torch.tensor([0,0])):
+
+        # 用于统计时间的变量
+        self.total_prefill_time = 0.0
+        self.total_decode_time = 0.0
+
+    def _load_layer(self, layer_idx, buffer_index, expert_ids, expert_weights=torch.tensor([0, 0])):
         """
         加载指定层的参数到指定的缓冲区。
         
@@ -186,8 +189,8 @@ class PipelineLLM:
         layer = self.llm.model.layers[layer_idx]
         expert0 = layer.block_sparse_moe.experts[expert_ids[0]]
         expert1 = layer.block_sparse_moe.experts[expert_ids[1]]
-        if layer_idx == 1:
-            print(expert_ids[0].data, expert_ids[1].data, '{:.3f}, {:.3f}'.format(expert_weights[0], expert_weights[1]))
+        # if layer_idx == 1:
+        #     print(expert_ids[0].data, expert_ids[1].data, '{:.3f}, {:.3f}'.format(expert_weights[0], expert_weights[1]))
 
         cpu_mlp = expert0.cpu_mlp
         cpu_mlp_expert1 = expert1.cpu_mlp
@@ -197,113 +200,59 @@ class PipelineLLM:
         buffer.load_expert_weights(expert_weights)
         # 异步加载参数
         buffer.load_from_cpu(cpu_mlp, cpu_mlp_expert1, stream)
-    
+
     def _replace_forward_methods(self):
         """
         替换模型每一层的 forward 方法，添加参数预加载逻辑和注意力计算。
         """
         for i, layer in enumerate(self.llm.model.layers):
-            def new_prefill_forward(hidden_states: torch.Tensor,
+            def new_forward(hidden_states: torch.Tensor,
                         attention_mask: Optional[torch.Tensor] = None,
                         position_ids: Optional[torch.LongTensor] = None,
                         past_key_value: Optional[Tuple[torch.Tensor]] = None,
                         output_attentions: Optional[bool] = False,
                         output_router_logits: Optional[bool] = False,
                         use_cache: Optional[bool] = False,
-                        cache_position: Optional[torch.LongTensor] = None):
-                """
-                Prefill阶段的forward方法，处理seq_length > 1的情况
-                """
-                # Self Attention
-                residual = hidden_states
-                hidden_states = layer.input_layernorm(hidden_states)
-                hidden_states, self_attn_weights, present_key_value = layer.self_attn(
-                    hidden_states=hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                )
-                hidden_states = residual + hidden_states
-
-                # Fully Connected
-                residual = hidden_states
-                hidden_states = layer.post_attention_layernorm(hidden_states)
-                
-                # 对于prefill阶段，仅将experts加载到GPU计算
-                batch_size, sequence_length, hidden_dim = hidden_states.shape
-                hidden_states = hidden_states.view(-1, hidden_dim)
-                
-                # 获取当前层的experts
-                experts = layer.block_sparse_moe.experts
-                
-                # 将experts移动到GPU
-                for expert in experts:
-                    expert.to('cuda')
-                
-                # 在GPU上进行MoE计算（gate保持在CPU）
-                final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
-                
-                # 将计算结果reshape回原始形状
-                final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-                
-                # 计算完成后将experts移回CPU
-                for expert in experts:
-                    expert.to('cpu')
-                
-                hidden_states = residual + final_hidden_states
-
-                outputs = (hidden_states,)
-                if output_attentions:
-                    outputs += (self_attn_weights,)
-                if use_cache:
-                    outputs += (present_key_value,)
-                if output_router_logits:
-                    outputs += (router_logits,)
-                    
-                return outputs
-            def new_forward(hidden_states: torch.Tensor,
-                            attention_mask: Optional[torch.Tensor] = None,
-                            position_ids: Optional[torch.LongTensor] = None,
-                            past_key_value: Optional[Tuple[torch.Tensor]] = None,
-                            output_attentions: Optional[bool] = False,
-                            output_router_logits: Optional[bool] = False,
-                            use_cache: Optional[bool] = False,
-                            cache_position: Optional[torch.LongTensor] = None,
-                            layer_idx=i):
+                        cache_position: Optional[torch.LongTensor] = None,
+                        layer=layer,
+                        layer_idx=i):
                 with self.lock:
-                    # 选择当前使用的缓冲区
-                    current_buffer = self.cached_mlps[0] if self.use_buffer0 else self.cached_mlps[1]
-                    # current_stream = self.stream0 if self.use_buffer0 else self.stream1
-
-                    # 切换缓冲区用于下一次
-                    next_buffer_index = 1 if self.use_buffer0 else 0
-                    # next_buffer = self.cached_mlps[next_buffer_index]
-                    # next_stream = self.stream1 if self.use_buffer0 else self.stream0
-
-                    next_layer_idx = layer_idx + 1
-
-                    if next_layer_idx < self.num_layers:
-                        # 预加载下一层的参数
-                        next_layer = self.llm.model.layers[next_layer_idx]
-                        router = next_layer.block_sparse_moe.gate
-
-                        batch_size, sequence_length, hidden_dim = hidden_states.shape
-                        hidden_states = hidden_states.view(-1, hidden_dim)
-                        # router_logits: (batch * sequence_length, n_experts)
-                        router_logits = router(hidden_states)
-                        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-                        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-                        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-
-                        hidden_states = hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-                        
-                        self._load_layer(next_layer_idx, buffer_index=next_buffer_index, expert_ids =selected_experts[0], expert_weights=routing_weights[0])
+                    batch_size, sequence_length, hidden_dim = hidden_states.shape
                     
-                    # 切换缓冲区
-                    self.use_buffer0 = not self.use_buffer0
+                    if sequence_length == 1:
+                        #### decode phase ####
+                        # 选择当前使用的缓冲区
+                        current_buffer = self.cached_mlps[0] if self.use_buffer0 else self.cached_mlps[1]
+
+                        next_buffer_index = 1 if self.use_buffer0 else 0
+
+                        next_layer_idx = layer_idx + 1
+
+                        if next_layer_idx < self.num_layers:
+                            # 预加载下一层的参数
+                            next_layer = self.llm.model.layers[next_layer_idx]
+                            router = next_layer.block_sparse_moe.gate
+
+                            # batch_size, sequence_length, hidden_dim = hidden_states.shape
+                            hidden_states_flat = hidden_states.view(-1, hidden_dim)
+                            # router_logits: (batch * sequence_length, n_experts)
+                            router_logits = router(hidden_states_flat)
+
+                            routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+                            routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+                            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+
+                            hidden_states = hidden_states_flat.reshape(batch_size, sequence_length, hidden_dim)
+
+                            self._load_layer(
+                                next_layer_idx,
+                                buffer_index=next_buffer_index,
+                                expert_ids=selected_experts[0],
+                                expert_weights=routing_weights[0]
+                            )
+
+                        # 切换缓冲区
+                        self.use_buffer0 = not self.use_buffer0
 
                     # 处理当前层
                     residual = hidden_states
@@ -324,34 +273,55 @@ class PipelineLLM:
                     # Fully Connected
                     residual = hidden_states
                     hidden_states = layer.post_attention_layernorm(hidden_states)
-                    batch_size, sequence_length, hidden_dim = hidden_states.shape
-                    hidden_states = hidden_states.view(-1, hidden_dim)
-                    if layer_idx > 0:
-                        ### 使用当前缓冲区进行 MLP 计算 ###
-                        final_hidden_states = current_buffer(hidden_states)
+
+                    if sequence_length > 1:
+                        # print("in prefill layer ", layer_idx)
+                        # 对于prefill阶段，仅将experts加载到GPU计算
+                        experts = layer.block_sparse_moe.experts
+
+                        # 将experts移动到GPU
+                        for expert in experts:
+                            expert.to('cuda')
+
+                        # 在GPU上进行MoE计算（gate保持在CPU）
+                        final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
+
+                        # 计算完成后将experts移回CPU
+                        if layer_idx != 0:
+                            for expert in experts:
+                                expert.to('cpu')
                     else:
-                        ### 根据router计算需要使用的专家 ###
-                        cur_layer = self.llm.model.layers[layer_idx]
-                        router = cur_layer.block_sparse_moe.gate
-                        # router_logits: (batch * sequence_length, n_experts)
-                        router_logits = router(hidden_states)
+                        # batch_size, sequence_length, hidden_dim = hidden_states.shape
+                        hidden_states_flat = hidden_states.view(-1, hidden_dim)
+                        # print("in decode layer", layer_idx)
+                        if layer_idx > 0:
+                            ### 使用当前缓冲区进行 MLP 计算 ###
+                            final_hidden_states = current_buffer(hidden_states_flat)
+                        else:
+                            ### 根据router计算需要使用的专家 ###
+                            cur_layer = layer
+                            router = cur_layer.block_sparse_moe.gate
+                            # router_logits: (batch * sequence_length, n_experts)
+                            router_logits = router(hidden_states_flat)
 
-                        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-                        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-                        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-                        # we cast back to the input dtype
-                        routing_weights = routing_weights.to(hidden_states.dtype)
+                            routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+                            routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+                            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+                            # we cast back to the input dtype
+                            routing_weights = routing_weights.to(hidden_states_flat.dtype)
 
-                        first_expert, second_expert = selected_experts[0][0], selected_experts[0][1]
+                            first_expert, second_expert = selected_experts[0][0], selected_experts[0][1]
 
-                        final_hidden_states_expert0 = cur_layer.block_sparse_moe.experts[first_expert](hidden_states) * routing_weights[0][0]
+                            final_hidden_states_expert0 = cur_layer.block_sparse_moe.experts[first_expert](
+                                hidden_states_flat) * routing_weights[0][0]
 
-                        final_hidden_states_expert1 = cur_layer.block_sparse_moe.experts[second_expert](hidden_states) * routing_weights[0][1]
+                            final_hidden_states_expert1 = cur_layer.block_sparse_moe.experts[second_expert](
+                                hidden_states_flat) * routing_weights[0][1]
 
-                        # 将两个专家的结果相加
-                        final_hidden_states = final_hidden_states_expert0 + final_hidden_states_expert1
+                            # 将两个专家的结果相加
+                            final_hidden_states = final_hidden_states_expert0 + final_hidden_states_expert1
 
-                    final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+                        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
 
                     hidden_states = residual + final_hidden_states
 
@@ -365,19 +335,5 @@ class PipelineLLM:
 
                     return outputs
 
-            # 根据seq_length选择使用prefill还是decode forward
-            def combined_forward(hidden_states: torch.Tensor, *args, **kwargs):
-                batch_size, seq_len, _ = hidden_states.shape
-                if seq_len > 1:  # prefill阶段
-                    return new_prefill_forward(hidden_states, *args, **kwargs)
-                else:  # decode阶段
-                    return new_forward(hidden_states, *args, **kwargs)
-                
             # 替换forward方法
-            layer.forward = combined_forward
-
-# # 将模型转换为使用CachedMLP的版本
-# llm, cached_mlps = convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.8)
-
-# # 创建流水线模型
-# pipeline_llm = PipelineLLM(llm, cached_mlps).llm
+            layer.forward = new_forward
