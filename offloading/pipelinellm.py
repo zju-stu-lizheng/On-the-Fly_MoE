@@ -14,16 +14,18 @@ class CachedMLP(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.dtype = dtype
-
         print("active neural num ",self.activenum)
 
         self.activation = nn.SiLU()
+
+        #### 中间变量
+        self.w3_result1 = None
+        self.w3_result2 = None
 
         # GPU 缓存张量
         self.w1_gpu = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
         self.w2_gpu = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
         self.w3_gpu = None
-
         # 第二个专家的 GPU 缓存张量
         self.w1_gpu_expert1 = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
         self.w2_gpu_expert1 = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
@@ -32,54 +34,56 @@ class CachedMLP(nn.Module):
         # Pinned Memory 缓冲区
         self.register_buffer('sparse_w1_cpu', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
         self.register_buffer('sparse_w2_cpu', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
-
         self.sparse_w1_cpu = self.sparse_w1_cpu.pin_memory()
         self.sparse_w2_cpu = self.sparse_w2_cpu.pin_memory()
 
         # 第二个专家的 Pinned Memory 缓冲区
         self.register_buffer('sparse_w1_cpu_expert1', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
         self.register_buffer('sparse_w2_cpu_expert1', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
-
         self.sparse_w1_cpu_expert1 = self.sparse_w1_cpu_expert1.pin_memory()
         self.sparse_w2_cpu_expert1 = self.sparse_w2_cpu_expert1.pin_memory()
 
         self.expert0_weight = torch.tensor(0)
         self.expert1_weight = torch.tensor(0)
 
-        # 统计信息
-        self.load_from_cpu_time = 0.0
-        self.load_from_cpu_calls = 0
 
-    def load_from_cpu(self, cpu_mlp, cpu_mlp_expert1, stream: torch.cuda.Stream):
+    def load_w3_weight(self, cpu_mlp, cpu_mlp_expert1,):
+        # 直接赋值 w3_gpu 和 w3_gpu_expert1
+        # 固定在GPU上的w3
+        self.w3_gpu = cpu_mlp['w3']
+        self.w3_gpu_expert1 = cpu_mlp_expert1['w3']
+
+    def load_from_cpu(self, cpu_mlp, cpu_mlp_expert1, stream: torch.cuda.Stream, up_result1, up_result2):
         """
         从CPU加载参数，并使用指定的CUDA流进行异步复制到GPU。
         
         参数:
-            cpu_mlp: 包含CPU上参数的字典（第一个专家）。
+            cpu_mlp: 包含CPU上参数的字典（第一个专家）
             cpu_mlp_expert1: 包含CPU上参数的字典（第二个专家）。
             stream: 用于数据传输的CUDA流。
         """
-        # 生成随机索引
-        random_indices = torch.randperm(cpu_mlp['w1'].data.size(0))[:self.activenum]
-        # sorted_indices = torch.sort(random_indices).values
+        # 提取 up_result1 的值并计算 top-k 索引
+        _, indices1 = torch.topk(up_result1, self.activenum, dim=1)  # 在第二个维度上取 top-k
+        # 对 w1 进行索引操作
+        self.w3_result1 = up_result1[: , indices1[0]]
+        indices1 = indices1[0].cpu()
+
+        _, indices2 = torch.topk(up_result2, self.activenum, dim=1)  # 在第二个维度上取 top-k
+        self.w3_result2 = up_result2[: , indices2[0]]
+        indices2 = indices2[0].cpu()  # 去除多余的维度，得到形状为 [k] 的索引张量
 
         # 从CPU加载参数（第一个专家）
-        self.sparse_w1_cpu.copy_(cpu_mlp['w1'].data[random_indices, :])
-        self.sparse_w2_cpu.copy_(cpu_mlp['w2'].data[random_indices, :])
+        self.sparse_w1_cpu.copy_(cpu_mlp['w1'].data[indices1, :])
+        self.sparse_w2_cpu.copy_(cpu_mlp['w2'].data[indices1, :])
         # 从CPU加载参数（第二个专家）
-        self.sparse_w1_cpu_expert1.copy_(cpu_mlp_expert1['w1'].data[random_indices, :])
-        self.sparse_w2_cpu_expert1.copy_(cpu_mlp_expert1['w2'].data[random_indices, :])
+        self.sparse_w1_cpu_expert1.copy_(cpu_mlp_expert1['w1'].data[indices2, :])
+        self.sparse_w2_cpu_expert1.copy_(cpu_mlp_expert1['w2'].data[indices2, :])
         # 异步复制到GPU
         with torch.cuda.stream(stream):
             self.w1_gpu.copy_(self.sparse_w1_cpu, non_blocking=True)
             self.w2_gpu.copy_(self.sparse_w2_cpu, non_blocking=True)
             self.w1_gpu_expert1.copy_(self.sparse_w1_cpu_expert1, non_blocking=True)
             self.w2_gpu_expert1.copy_(self.sparse_w2_cpu_expert1, non_blocking=True)
-        
-        # 直接赋值 w3_gpu 和 w3_gpu_expert1
-        # 固定在GPU上的w3
-        self.w3_gpu = cpu_mlp['w3']
-        self.w3_gpu_expert1 = cpu_mlp_expert1['w3']
 
     def load_expert_weights(self, expert_weights):
         self.expert0_weight = expert_weights[0]
@@ -90,13 +94,13 @@ class CachedMLP(nn.Module):
         根据hidden_states， 分别计算两个专家的输出
         """
         # 第一个专家的计算
-        w3_output = self.w3_gpu(hidden_states)[:, :self.activenum]
+        w3_output = self.w3_result1
         w1_output = self.activation(torch.matmul(hidden_states, self.w1_gpu.T))
         # w2 = self.w2_gpu.T
         hidden_states_expert0 = torch.matmul(w1_output * w3_output, self.w2_gpu)
 
         # 第二个专家的计算
-        w3_output_expert1 = self.w3_gpu_expert1(hidden_states)[:, :self.activenum]
+        w3_output_expert1 = self.w3_result2
         w1_output_expert1 = self.activation(torch.matmul(hidden_states, self.w1_gpu_expert1.T))
         # w2_expert1 = self.w2_gpu_expert1.T
         hidden_states_expert1 = torch.matmul(w1_output_expert1 * w3_output_expert1, self.w2_gpu_expert1)
@@ -168,9 +172,6 @@ class PipelineLLM:
         self.stream0 = torch.cuda.Stream()
         self.stream1 = torch.cuda.Stream()
 
-        # 初始化加载第一个和第二个层的参数
-        # self._load_layer(1, buffer_index=0, expert_ids=torch.tensor([0, 1]))
-        # self._load_layer(1, buffer_index=1, expert_ids=torch.tensor([0, 1]))
         self.top_k = 2
         self.activation = nn.SiLU()
 
@@ -180,7 +181,8 @@ class PipelineLLM:
         self.total_prefill_time = 0.0
         self.total_decode_time = 0.0
 
-    def _load_layer(self, layer_idx, buffer_index, expert_ids, expert_weights=torch.tensor([0, 0])):
+    def _load_layer(self, layer_idx, buffer_index, expert_ids, expert_weights,
+                    hidden_states):
         """
         加载指定层的参数到指定的缓冲区。
         
@@ -191,8 +193,6 @@ class PipelineLLM:
         layer = self.llm.model.layers[layer_idx]
         expert0 = layer.block_sparse_moe.experts[expert_ids[0]]
         expert1 = layer.block_sparse_moe.experts[expert_ids[1]]
-        # if layer_idx == 1:
-        #     print(expert_ids[0].data, expert_ids[1].data, '{:.3f}, {:.3f}'.format(expert_weights[0], expert_weights[1]))
 
         cpu_mlp = expert0.cpu_mlp
         cpu_mlp_expert1 = expert1.cpu_mlp
@@ -200,8 +200,14 @@ class PipelineLLM:
         stream = self.stream0 if buffer_index == 0 else self.stream1
 
         buffer.load_expert_weights(expert_weights)
+        ### 实际上是赋指针进去，驻留在GPU上面的
+        buffer.load_w3_weight(cpu_mlp, cpu_mlp_expert1)
+
         # 异步加载参数
-        buffer.load_from_cpu(cpu_mlp, cpu_mlp_expert1, stream)
+        ### todo ： 把up计算的结果一并传入
+        up_result1 = buffer.w3_gpu(hidden_states)
+        up_result2 = buffer.w3_gpu_expert1(hidden_states)
+        buffer.load_from_cpu(cpu_mlp, cpu_mlp_expert1, stream, up_result1, up_result2)
 
     def _replace_forward_methods(self):
         """
@@ -244,14 +250,15 @@ class PipelineLLM:
                             routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
                             routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-                            hidden_states = hidden_states_flat.reshape(batch_size, sequence_length, hidden_dim)
-
                             self._load_layer(
                                 next_layer_idx,
                                 buffer_index=next_buffer_index,
                                 expert_ids=selected_experts[0],
-                                expert_weights=routing_weights[0]
+                                expert_weights=routing_weights[0],
+                                hidden_states=hidden_states_flat,
                             )
+
+                            hidden_states = hidden_states_flat.reshape(batch_size, sequence_length, hidden_dim)
 
                         # 切换缓冲区
                         self.use_buffer0 = not self.use_buffer0
