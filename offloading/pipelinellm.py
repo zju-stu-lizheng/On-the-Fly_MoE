@@ -283,7 +283,7 @@ class PipelineLLM:
 
                         # 将experts移动到GPU
                         for expert in experts:
-                            expert.to('cuda')
+                            expert.cuda(0)
 
                         # 在GPU上进行MoE计算（gate保持在CPU）
                         final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
