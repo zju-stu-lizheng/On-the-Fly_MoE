@@ -20,13 +20,13 @@ class CachedMLP(nn.Module):
         self.activation = nn.SiLU()
 
         # GPU 缓存张量
-        self.w1_gpu = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda')
-        self.w2_gpu = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda')
+        self.w1_gpu = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
+        self.w2_gpu = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
         self.w3_gpu = None
 
         # 第二个专家的 GPU 缓存张量
-        self.w1_gpu_expert1 = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda')
-        self.w2_gpu_expert1 = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda')
+        self.w1_gpu_expert1 = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
+        self.w2_gpu_expert1 = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
         self.w3_gpu_expert1 = None
 
         # Pinned Memory 缓冲区
@@ -35,7 +35,6 @@ class CachedMLP(nn.Module):
 
         self.sparse_w1_cpu = self.sparse_w1_cpu.pin_memory()
         self.sparse_w2_cpu = self.sparse_w2_cpu.pin_memory()
-
 
         # 第二个专家的 Pinned Memory 缓冲区
         self.register_buffer('sparse_w1_cpu_expert1', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
@@ -91,13 +90,13 @@ class CachedMLP(nn.Module):
         根据hidden_states， 分别计算两个专家的输出
         """
         # 第一个专家的计算
-        w3_output = torch.matmul(hidden_states, self.w3_gpu.T)[:, :self.activenum]
+        w3_output = self.w3_gpu(hidden_states)[:, :self.activenum]
         w1_output = self.activation(torch.matmul(hidden_states, self.w1_gpu.T))
         # w2 = self.w2_gpu.T
         hidden_states_expert0 = torch.matmul(w1_output * w3_output, self.w2_gpu)
 
         # 第二个专家的计算
-        w3_output_expert1 = torch.matmul(hidden_states, self.w3_gpu_expert1.T)[:, :self.activenum]
+        w3_output_expert1 = self.w3_gpu_expert1(hidden_states)[:, :self.activenum]
         w1_output_expert1 = self.activation(torch.matmul(hidden_states, self.w1_gpu_expert1.T))
         # w2_expert1 = self.w2_gpu_expert1.T
         hidden_states_expert1 = torch.matmul(w1_output_expert1 * w3_output_expert1, self.w2_gpu_expert1)
@@ -108,20 +107,20 @@ class CachedMLP(nn.Module):
                         
 def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9):
     ### 其他部分存放在GPU上
-    llm.model.embed_tokens.cuda()
+    llm.model.embed_tokens.cuda(0)
     for i in range(len(llm.model.layers)):
-        llm.model.layers[i].self_attn.cuda()
-        llm.model.layers[i].input_layernorm.cuda()
-        llm.model.layers[i].post_attention_layernorm.cuda()
-        llm.model.layers[i].block_sparse_moe.gate.cuda()
+        llm.model.layers[i].self_attn.cuda(0)
+        llm.model.layers[i].input_layernorm.cuda(0)
+        llm.model.layers[i].post_attention_layernorm.cuda(0)
+        llm.model.layers[i].block_sparse_moe.gate.cuda(0)
         for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
-            llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda()
+            llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(0)
     ### 第0层的专家存放在GPU上
     for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
-        llm.model.layers[0].block_sparse_moe.experts[j].cuda()
+        llm.model.layers[0].block_sparse_moe.experts[j].cuda(0)
 
-    llm.model.norm.cuda()
-    llm.lm_head.cuda()
+    llm.model.norm.cuda(0)
+    llm.lm_head.cuda(0)
     
     # 创建两个共享的CachedMLP实例
     buffer0 = CachedMLP(
@@ -146,7 +145,7 @@ def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9):
             expert.cpu_mlp = {
                 "w1": expert.w1.cpu().weight,
                 "w2": expert.w2.cpu().weight.T.contiguous(),
-                "w3": expert.w3.weight,
+                "w3": expert.w3,
             }
     return llm, cached_mlps
 
@@ -170,8 +169,8 @@ class PipelineLLM:
         self.stream1 = torch.cuda.Stream()
 
         # 初始化加载第一个和第二个层的参数
-        self._load_layer(1, buffer_index=0, expert_ids=torch.tensor([0, 1]))
-        self._load_layer(1, buffer_index=1, expert_ids=torch.tensor([0, 1]))
+        # self._load_layer(1, buffer_index=0, expert_ids=torch.tensor([0, 1]))
+        # self._load_layer(1, buffer_index=1, expert_ids=torch.tensor([0, 1]))
         self.top_k = 2
         self.activation = nn.SiLU()
 
@@ -276,7 +275,7 @@ class PipelineLLM:
                     # Fully Connected
                     residual = hidden_states
                     hidden_states = layer.post_attention_layernorm(hidden_states)
-
+                    
                     if sequence_length > 1:
                         # print("in prefill layer ", layer_idx)
                         # 对于prefill阶段，仅将experts加载到GPU计算
