@@ -21,29 +21,28 @@ class CachedMLP(nn.Module):
 
         # GPU 缓存张量
         self.w1_gpu = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda')
-        self.w2_gpu = torch.empty((self.input_dim, self.activenum), dtype=self.dtype, device='cuda')
+        self.w2_gpu = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda')
         self.w3_gpu = None
 
         # 第二个专家的 GPU 缓存张量
         self.w1_gpu_expert1 = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda')
-        self.w2_gpu_expert1 = torch.empty((self.input_dim, self.activenum), dtype=self.dtype, device='cuda')
+        self.w2_gpu_expert1 = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda')
         self.w3_gpu_expert1 = None
 
         # Pinned Memory 缓冲区
         self.register_buffer('sparse_w1_cpu', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
-        self.register_buffer('sparse_w2_cpu', torch.empty((self.input_dim, self.activenum), dtype=self.dtype, device='cpu'))
-        # self.register_buffer('sparse_w3_cpu', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
+        self.register_buffer('sparse_w2_cpu', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
+
         self.sparse_w1_cpu = self.sparse_w1_cpu.pin_memory()
         self.sparse_w2_cpu = self.sparse_w2_cpu.pin_memory()
-        # self.sparse_w3_cpu = self.sparse_w3_cpu.pin_memory()
+
 
         # 第二个专家的 Pinned Memory 缓冲区
         self.register_buffer('sparse_w1_cpu_expert1', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
-        self.register_buffer('sparse_w2_cpu_expert1', torch.empty((self.input_dim, self.activenum), dtype=self.dtype, device='cpu'))
-        # self.register_buffer('sparse_w3_cpu_expert1', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
+        self.register_buffer('sparse_w2_cpu_expert1', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
+
         self.sparse_w1_cpu_expert1 = self.sparse_w1_cpu_expert1.pin_memory()
         self.sparse_w2_cpu_expert1 = self.sparse_w2_cpu_expert1.pin_memory()
-        # self.sparse_w3_cpu_expert1 = self.sparse_w3_cpu_expert1.pin_memory()
 
         self.expert0_weight = torch.tensor(0)
         self.expert1_weight = torch.tensor(0)
@@ -51,6 +50,37 @@ class CachedMLP(nn.Module):
         # 统计信息
         self.load_from_cpu_time = 0.0
         self.load_from_cpu_calls = 0
+
+    def load_from_cpu(self, cpu_mlp, cpu_mlp_expert1, stream: torch.cuda.Stream):
+        """
+        从CPU加载参数，并使用指定的CUDA流进行异步复制到GPU。
+        
+        参数:
+            cpu_mlp: 包含CPU上参数的字典（第一个专家）。
+            cpu_mlp_expert1: 包含CPU上参数的字典（第二个专家）。
+            stream: 用于数据传输的CUDA流。
+        """
+        # 生成随机索引
+        random_indices = torch.randperm(cpu_mlp['w1'].data.size(0))[:self.activenum]
+        # sorted_indices = torch.sort(random_indices).values
+
+        # 从CPU加载参数（第一个专家）
+        self.sparse_w1_cpu.copy_(cpu_mlp['w1'].data[random_indices, :])
+        self.sparse_w2_cpu.copy_(cpu_mlp['w2'].data[random_indices, :])
+        # 从CPU加载参数（第二个专家）
+        self.sparse_w1_cpu_expert1.copy_(cpu_mlp_expert1['w1'].data[random_indices, :])
+        self.sparse_w2_cpu_expert1.copy_(cpu_mlp_expert1['w2'].data[random_indices, :])
+        # 异步复制到GPU
+        with torch.cuda.stream(stream):
+            self.w1_gpu.copy_(self.sparse_w1_cpu, non_blocking=True)
+            self.w2_gpu.copy_(self.sparse_w2_cpu, non_blocking=True)
+            self.w1_gpu_expert1.copy_(self.sparse_w1_cpu_expert1, non_blocking=True)
+            self.w2_gpu_expert1.copy_(self.sparse_w2_cpu_expert1, non_blocking=True)
+        
+        # 直接赋值 w3_gpu 和 w3_gpu_expert1
+        # 固定在GPU上的w3
+        self.w3_gpu = cpu_mlp['w3']
+        self.w3_gpu_expert1 = cpu_mlp_expert1['w3']
 
     def load_expert_weights(self, expert_weights):
         self.expert0_weight = expert_weights[0]
@@ -63,54 +93,19 @@ class CachedMLP(nn.Module):
         # 第一个专家的计算
         w3_output = torch.matmul(hidden_states, self.w3_gpu.T)[:, :self.activenum]
         w1_output = self.activation(torch.matmul(hidden_states, self.w1_gpu.T))
-        w2 = self.w2_gpu.T
-        hidden_states_expert0 = torch.matmul(w1_output * w3_output, w2)
+        # w2 = self.w2_gpu.T
+        hidden_states_expert0 = torch.matmul(w1_output * w3_output, self.w2_gpu)
 
         # 第二个专家的计算
         w3_output_expert1 = torch.matmul(hidden_states, self.w3_gpu_expert1.T)[:, :self.activenum]
         w1_output_expert1 = self.activation(torch.matmul(hidden_states, self.w1_gpu_expert1.T))
-        w2_expert1 = self.w2_gpu_expert1.T
-        hidden_states_expert1 = torch.matmul(w1_output_expert1 * w3_output_expert1, w2_expert1)
+        # w2_expert1 = self.w2_gpu_expert1.T
+        hidden_states_expert1 = torch.matmul(w1_output_expert1 * w3_output_expert1, self.w2_gpu_expert1)
 
         final_hidden_states = hidden_states_expert0* self.expert0_weight + hidden_states_expert1* self.expert1_weight
         
         return final_hidden_states
                         
-    def load_from_cpu(self, cpu_mlp, cpu_mlp_expert1, stream: torch.cuda.Stream):
-        """
-        从CPU加载参数，并使用指定的CUDA流进行异步复制到GPU。
-        
-        参数:
-            cpu_mlp: 包含CPU上参数的字典（第一个专家）。
-            cpu_mlp_expert1: 包含CPU上参数的字典（第二个专家）。
-            stream: 用于数据传输的CUDA流。
-        """
-        # 生成随机索引
-        random_indices = torch.randperm(cpu_mlp['w1'].data.size(0))[:self.activenum]
-
-        # 从CPU加载参数（第一个专家）
-        self.sparse_w1_cpu.copy_(cpu_mlp['w1'].data[random_indices, :])
-        self.sparse_w2_cpu.copy_(cpu_mlp['w2'].data[:, random_indices])
-        # self.sparse_w3_cpu.copy_(cpu_mlp['w3'].data[random_indices, :])
-        with torch.cuda.stream(stream):
-            self.w1_gpu.copy_(self.sparse_w1_cpu, non_blocking=True)
-            self.w2_gpu.copy_(self.sparse_w2_cpu, non_blocking=True)
-            
-        # 从CPU加载参数（第二个专家）
-        self.sparse_w1_cpu_expert1.copy_(cpu_mlp_expert1['w1'].data[random_indices, :])
-        self.sparse_w2_cpu_expert1.copy_(cpu_mlp_expert1['w2'].data[:, random_indices])
-        # self.sparse_w3_cpu_expert1.copy_(cpu_mlp_expert1['w3'].data[random_indices, :])
-        # 直接赋值 w3_gpu 和 w3_gpu_expert1
-        # 固定在GPU上的w3
-        self.w3_gpu = cpu_mlp['w3']
-        self.w3_gpu_expert1 = cpu_mlp_expert1['w3']
-        # 异步复制到GPU
-        with torch.cuda.stream(stream):
-            # 第二个专家的异步复制
-            self.w1_gpu_expert1.copy_(self.sparse_w1_cpu_expert1, non_blocking=True)
-            self.w2_gpu_expert1.copy_(self.sparse_w2_cpu_expert1, non_blocking=True)
-            # self.w3_gpu_expert1.copy_(self.sparse_w3_cpu_expert1, non_blocking=True)
-
 def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9):
     ### 其他部分存放在GPU上
     llm.model.embed_tokens.cuda()
@@ -150,7 +145,7 @@ def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9):
         for j, expert in enumerate(layer.block_sparse_moe.experts):
             expert.cpu_mlp = {
                 "w1": expert.w1.cpu().weight,
-                "w2": expert.w2.cpu().weight,
+                "w2": expert.w2.cpu().weight.T.contiguous(),
                 "w3": expert.w3.weight,
             }
     return llm, cached_mlps
