@@ -135,9 +135,7 @@ class PipelineLLM:
         self.lock = threading.Lock()
         self.use_buffer0 = True  # 标记当前使用哪个缓冲区
 
-        # 创建两个共享的CUDA流
         self.stream0 = torch.cuda.Stream()
-        self.stream1 = torch.cuda.Stream()
 
         self.top_k = 2
         self.activation = nn.SiLU()
@@ -154,7 +152,7 @@ class PipelineLLM:
         print("all reload experts are:", self.total_reload_experts)
         self.total_reload_experts = 0
 
-    def _load_layer(self, layer_idx, buffer_index, expert_ids,
+    def _load_layer(self, layer_idx, buffer, expert_ids,
                     hidden_states):
         """
         加载指定层的参数到指定的缓冲区。
@@ -169,15 +167,13 @@ class PipelineLLM:
 
         cpu_mlp = expert0.cpu_mlp
         cpu_mlp_expert1 = expert1.cpu_mlp
-        buffer = self.cached_mlps[buffer_index]
-        stream = self.stream0 if buffer_index == 0 else self.stream1
 
         ### weights应该用正确的来算
         buffer.load_expert_weights(expert_ids)
         # 异步加载参数
-        buffer.load_from_cpu(cpu_mlp, cpu_mlp_expert1, stream, hidden_states)
+        buffer.load_from_cpu(cpu_mlp, cpu_mlp_expert1, self.stream0, hidden_states)
 
-    def _load_conflict_layer(self, layer_idx, buffer_index, expert_ids, predict_experts, hidden_states):
+    def _load_conflict_layer(self, layer_idx, buffer, expert_ids, hidden_states):
         """
         处理专家预测冲突的情况，尽可能复用已加载的专家权重
         
@@ -188,6 +184,8 @@ class PipelineLLM:
             predict_experts: 预测的专家ID
             hidden_states: 输入hidden_states
         """
+        predict_experts = buffer.get_predict_experts()
+        print(f"predict_experts in layer {layer_idx}: {predict_experts}")
         # 找出需要加载的新专家
         required_experts = set(expert_ids.tolist()) - set(predict_experts.tolist())
         
@@ -197,7 +195,7 @@ class PipelineLLM:
             # 找出可以复用的专家位置
             reuse_idx = 0 if expert_ids[0] in predict_experts else 1
 
-            # print(f"reloading 1 experts, {expert_ids[1-reuse_idx]}")
+            print(f"reloading 1 experts, {expert_ids[1-reuse_idx]}")
             self.total_reload_experts += 1
             
             # 获取需要加载的专家
@@ -205,20 +203,16 @@ class PipelineLLM:
             new_expert = layer.block_sparse_moe.experts[new_expert_id]
             cpu_mlp_new = new_expert.cpu_mlp
             
-            # 获取当前缓冲区
-            buffer = self.cached_mlps[buffer_index]
-            stream = self.stream0 if buffer_index == 0 else self.stream1
-            
             # 只更新需要加载的专家权重
-            buffer.load_conflict_cpu(cpu_mlp_new, stream, hidden_states, reuse_idx)
+            buffer.load_conflict_cpu(cpu_mlp_new, self.stream0, hidden_states, reuse_idx)
             
             # 更新专家ID
             buffer.load_expert_weights(expert_ids)
         else:
-            # print(f"reloading 2 experts, {expert_ids[:]}")
+            print(f"reloading 2 experts, {expert_ids[:]}")
             self.total_reload_experts += 2
             # 需要加载两个专家，直接调用原始方法
-            self._load_layer(layer_idx, buffer_index, expert_ids, hidden_states)
+            self._load_layer(layer_idx, buffer, expert_ids, hidden_states)
 
     def _replace_forward_methods(self):
         """
@@ -242,12 +236,13 @@ class PipelineLLM:
                         #### decode phase ####
                         # 选择当前使用的缓冲区
                         current_buffer = self.cached_mlps[0] if self.use_buffer0 else self.cached_mlps[1]
-
+                        
                         next_buffer_index = 1 if self.use_buffer0 else 0
-
                         next_layer_idx = layer_idx + 1
-
                         if next_layer_idx < self.num_layers:
+                            ### 使用下一个缓冲区进行加载
+                            next_buffer = self.cached_mlps[next_buffer_index]
+
                             # 预加载下一层的参数
                             next_layer = self.llm.model.layers[next_layer_idx]
                             router = next_layer.block_sparse_moe.gate
@@ -263,15 +258,14 @@ class PipelineLLM:
 
                             self._load_layer(
                                 next_layer_idx,
-                                buffer_index=next_buffer_index,
+                                buffer=next_buffer,
                                 expert_ids=selected_experts[0],
                                 hidden_states=hidden_states_flat,
                             )
-
                             hidden_states = hidden_states_flat.reshape(batch_size, sequence_length, hidden_dim)
 
-                        # 切换缓冲区
-                        self.use_buffer0 = not self.use_buffer0
+                            # 切换缓冲区
+                            self.use_buffer0 = not self.use_buffer0
 
                     # 处理当前层
                     residual = hidden_states
@@ -312,12 +306,10 @@ class PipelineLLM:
                                 expert.w1.to('cpu')
                                 expert.w2.to('cpu')
                     else:
-                        # batch_size, sequence_length, hidden_dim = hidden_states.shape
-                        hidden_states_flat = hidden_states.view(-1, hidden_dim)
                         # print("in decode layer", layer_idx)
+                        hidden_states_flat = hidden_states.view(-1, hidden_dim)
                         ### 根据router计算需要使用的专家 ###
-                        cur_layer = layer
-                        router = cur_layer.block_sparse_moe.gate
+                        router = layer.block_sparse_moe.gate
                         # router_logits: (batch * sequence_length, n_experts)
                         router_logits = router(hidden_states_flat)
 
@@ -332,8 +324,6 @@ class PipelineLLM:
                         ## tensor([6, 7], device='cuda:0')
                         if layer_idx > 0:
                             ### 判断加载是否正确
-                            current_buffer = self.cached_mlps[0] if self.use_buffer0 else self.cached_mlps[1]
-
                             predict_experts = current_buffer.get_predict_experts()
                             
                             # 判断expert_ids和predict_experts是否包含相同数据（忽略顺序）
@@ -341,9 +331,8 @@ class PipelineLLM:
                                 ### 不吻合，重新加载
                                 self._load_conflict_layer(
                                     layer_idx,
-                                    buffer_index=1-next_buffer_index,## 用cur_buffer_index
+                                    buffer=current_buffer,## 用cur_buffer_index
                                     expert_ids=expert_ids,
-                                    predict_experts=predict_experts,
                                     hidden_states=hidden_states_flat,
                                 )
                                 torch.cuda.synchronize()  # 等待所有CUDA操作完成                                
@@ -351,10 +340,10 @@ class PipelineLLM:
                             ### 使用当前缓冲区进行 MLP 计算 ###
                             final_hidden_states = current_buffer(hidden_states_flat, expert_weights, expert_ids)
                         else:
-                            final_hidden_states_expert0 = cur_layer.block_sparse_moe.experts[expert_ids[0]](
+                            final_hidden_states_expert0 = layer.block_sparse_moe.experts[expert_ids[0]](
                                 hidden_states_flat) * expert_weights[0]
 
-                            final_hidden_states_expert1 = cur_layer.block_sparse_moe.experts[expert_ids[1]](
+                            final_hidden_states_expert1 = layer.block_sparse_moe.experts[expert_ids[1]](
                                 hidden_states_flat) * expert_weights[1]
 
                             # 将两个专家的结果相加
