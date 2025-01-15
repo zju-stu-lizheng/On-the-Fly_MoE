@@ -111,13 +111,23 @@ def set_skip_layer_idx(layer_idx):
     skip_layer_idx = layer_idx 
     print(skip_layer_idx)
 
-def set_th_sparsity(sparsity=50, dataset='c4_base'):
+up_th = None
+def load_thresholds(threshold_path, use_average=True, zero = False):
     """
-    根据稀疏程度读取对应的阈值
+    load thresholds from path
     """
-    global th
-    filename = f'./threshold/{dataset}/th_{sparsity}.csv'
-    th = read_csv_to_2d_list(filename)
+    # f"{chess_up_threshold}/thresholds_0_8.pt"
+    global up_th
+    if zero:
+        up_th = [[0] * 8] * 32
+        # print(up_th)
+        return
+    if use_average:
+        up_th = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds_2"]
+    else:
+        up_th = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds"]
+    print(f"Thresholds loaded from {threshold_path}")
+    # return thresholds
 
 
 def set_print_info(flag = True):
@@ -763,13 +773,16 @@ class MixtralBLockSparseTop2MLP(nn.Module):
         self.w1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
         self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)
         self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
+        # if not profile_threshold:
+        self.up_threshold = torch.tensor(up_th[self.layer_idx][self.expert_idx])
 
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, hidden_states, routing_weights, preatt_score=None):
         # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
         activation = self.act_fn(self.w1(hidden_states)) 
-        v = torch.abs(activation*self.w3(hidden_states))
+        if preatt_score != None:
+            v = torch.abs(activation*self.w3(preatt_score))
 
         global th
         if profile_mode:
@@ -790,12 +803,15 @@ class MixtralBLockSparseTop2MLP(nn.Module):
                     x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (1.0/step)*(i+1) ).item()
             current_hidden_states = activation * self.w3(hidden_states)
         else:
-            mask = (v >= th[self.layer_idx][self.expert_idx]).to(hidden_states.dtype)
-            #### 动态预测数据采集
-            if profile_sparsity and self.layer_idx == skip_layer_idx:
-                dataset_x[self.expert_idx].append(preatt_score)
-                dataset_y[self.expert_idx].append(v)
-            current_hidden_states = torch.mul(self.w3(hidden_states), mask) * torch.mul(activation, mask)
+            if self.layer_idx != 0:
+                mask = (v >= self.up_threshold).to(hidden_states.dtype)
+            # #### 动态预测数据采集
+            # if profile_sparsity and self.layer_idx == skip_layer_idx:
+            #     dataset_x[self.expert_idx].append(preatt_score)
+            #     dataset_y[self.expert_idx].append(v)
+                current_hidden_states = torch.mul(self.w3(hidden_states), mask) * torch.mul(activation, mask)
+            else:
+                current_hidden_states = self.w3(hidden_states) * activation
         current_hidden_states = self.w2(current_hidden_states)
         return routing_weights * current_hidden_states
 
