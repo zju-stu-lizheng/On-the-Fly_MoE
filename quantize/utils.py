@@ -68,11 +68,11 @@ class CompensatedModel(torch.nn.Module):
         outputs += residual
         return outputs
 
-def get_model(model_name, device_map, dtype=torch.bfloat16):
+def get_model(model_name, device_map, dtype=torch.bfloat16, use_cache=True):
     llm = MixtralForCausalLM.from_pretrained(
         model_name,
         device_map=device_map,
-        use_cache=True,
+        use_cache=use_cache,
         torch_dtype=dtype,
     ) 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
