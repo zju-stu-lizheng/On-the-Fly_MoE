@@ -26,7 +26,7 @@ def doeval(dtype, lora_save_path, args):
 		load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=use_average, zero=True)
 	else:
 		load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=use_average,)
-	llm, tokenizer = get_model(model_name, device_map, dtype=dtype)
+	llm, tokenizer = get_model(model_name, device_map, dtype=dtype, use_cache=False)
 			
 	# task_name_list=['arc_challenge']
 	task_name_list = args.task_name_list

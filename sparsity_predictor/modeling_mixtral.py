@@ -804,7 +804,7 @@ class MixtralBLockSparseTop2MLP(nn.Module):
             current_hidden_states = activation * self.w3(hidden_states)
         else:
             if self.layer_idx != 0:
-                mask = (v >= self.up_threshold).to(hidden_states.dtype)
+                mask = (v.to(hidden_states.device) >= self.up_threshold.to(hidden_states.device)).to(hidden_states.dtype)
             # #### 动态预测数据采集
             # if profile_sparsity and self.layer_idx == skip_layer_idx:
             #     dataset_x[self.expert_idx].append(preatt_score)
