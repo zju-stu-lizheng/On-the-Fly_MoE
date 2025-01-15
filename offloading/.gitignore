@@ -1,4 +1,5 @@
 unuse/
 
+*.pt
 *.out
 *.json

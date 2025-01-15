@@ -4,7 +4,6 @@ import torch.nn as nn
 import threading
 import json
 import torch.nn.functional as F
-from queue import Queue
 
 class CachedMLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, dtype, sparsity: float = 0.2):
@@ -14,7 +13,7 @@ class CachedMLP(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.dtype = dtype
-        print("active neural num ",self.activenum)
+        print("active neural num ", self.activenum)
 
         self.activation = nn.SiLU()
 
@@ -22,38 +21,20 @@ class CachedMLP(nn.Module):
         self.w3_result1 = None
         self.w3_result2 = None
 
-        # GPU 缓存张量
-        self.w1_gpu = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
-        self.w2_gpu = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
-        self.w3_gpu = None
-        # 第二个专家的 GPU 缓存张量
-        self.w1_gpu_expert1 = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
-        self.w2_gpu_expert1 = torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0')
-        self.w3_gpu_expert1 = None
+        # 将GPU缓存张量改为列表存储
+        self.w_gpu = [
+            torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0') for _ in range(4)
+        ]  # [w1_gpu, w2_gpu, w1_gpu_expert1, w2_gpu_expert1]
 
-        # Pinned Memory 缓冲区
-        self.register_buffer('sparse_w1_cpu', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
-        self.register_buffer('sparse_w2_cpu', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
-        self.sparse_w1_cpu = self.sparse_w1_cpu.pin_memory()
-        self.sparse_w2_cpu = self.sparse_w2_cpu.pin_memory()
-
-        # 第二个专家的 Pinned Memory 缓冲区
-        self.register_buffer('sparse_w1_cpu_expert1', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
-        self.register_buffer('sparse_w2_cpu_expert1', torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu'))
-        self.sparse_w1_cpu_expert1 = self.sparse_w1_cpu_expert1.pin_memory()
-        self.sparse_w2_cpu_expert1 = self.sparse_w2_cpu_expert1.pin_memory()
+        # 将Pinned Memory缓冲区改为列表存储
+        self.sparse_w_cpu = [
+            torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu').pin_memory() for _ in range(4)
+        ]  # [sparse_w1_cpu, sparse_w2_cpu, sparse_w1_cpu_expert1, sparse_w2_cpu_expert1]
 
         self.expert0_weight = torch.tensor(0)
         self.expert1_weight = torch.tensor(0)
 
-
-    def load_w3_weight(self, cpu_mlp, cpu_mlp_expert1,):
-        # 直接赋值 w3_gpu 和 w3_gpu_expert1
-        # 固定在GPU上的w3
-        self.w3_gpu = cpu_mlp['w3']
-        self.w3_gpu_expert1 = cpu_mlp_expert1['w3']
-
-    def load_from_cpu(self, cpu_mlp, cpu_mlp_expert1, stream: torch.cuda.Stream, up_result1, up_result2):
+    def load_from_cpu(self, cpu_mlp, cpu_mlp_expert1, stream: torch.cuda.Stream, hidden_states):
         """
         从CPU加载参数，并使用指定的CUDA流进行异步复制到GPU。
         
@@ -62,6 +43,9 @@ class CachedMLP(nn.Module):
             cpu_mlp_expert1: 包含CPU上参数的字典（第二个专家）。
             stream: 用于数据传输的CUDA流。
         """
+        ### 根据up计算的结果进行稀疏化
+        up_result1 = cpu_mlp['w3'](hidden_states)
+        up_result2 = cpu_mlp_expert1['w3'](hidden_states)
         # 提取 up_result1 的值并计算 top-k 索引
         _, indices1 = torch.topk(up_result1, self.activenum, dim=1)  # 在第二个维度上取 top-k
         # 对 w1 进行索引操作
@@ -72,18 +56,18 @@ class CachedMLP(nn.Module):
         self.w3_result2 = up_result2[: , indices2[0]]
         indices2 = indices2[0].cpu()  # 去除多余的维度，得到形状为 [k] 的索引张量
 
-        # 从CPU加载参数（第一个专家）
-        self.sparse_w1_cpu.copy_(cpu_mlp['w1'].data[indices1, :])
-        self.sparse_w2_cpu.copy_(cpu_mlp['w2'].data[indices1, :])
-        # 从CPU加载参数（第二个专家）
-        self.sparse_w1_cpu_expert1.copy_(cpu_mlp_expert1['w1'].data[indices2, :])
-        self.sparse_w2_cpu_expert1.copy_(cpu_mlp_expert1['w2'].data[indices2, :])
+        # 使用列表索引更新CPU数据
+        self.sparse_w_cpu[0].copy_(cpu_mlp['w1'].data[indices1, :])
+        self.sparse_w_cpu[1].copy_(cpu_mlp['w2'].data[indices1, :])
+        self.sparse_w_cpu[2].copy_(cpu_mlp_expert1['w1'].data[indices2, :])
+        self.sparse_w_cpu[3].copy_(cpu_mlp_expert1['w2'].data[indices2, :])
+        
         # 异步复制到GPU
         with torch.cuda.stream(stream):
-            self.w1_gpu.copy_(self.sparse_w1_cpu, non_blocking=True)
-            self.w2_gpu.copy_(self.sparse_w2_cpu, non_blocking=True)
-            self.w1_gpu_expert1.copy_(self.sparse_w1_cpu_expert1, non_blocking=True)
-            self.w2_gpu_expert1.copy_(self.sparse_w2_cpu_expert1, non_blocking=True)
+            self.w_gpu[0].copy_(self.sparse_w_cpu[0], non_blocking=True)
+            self.w_gpu[1].copy_(self.sparse_w_cpu[1], non_blocking=True)
+            self.w_gpu[2].copy_(self.sparse_w_cpu[2], non_blocking=True)
+            self.w_gpu[3].copy_(self.sparse_w_cpu[3], non_blocking=True)
 
     def load_expert_weights(self, expert_weights):
         self.expert0_weight = expert_weights[0]
@@ -93,20 +77,16 @@ class CachedMLP(nn.Module):
         """
         根据hidden_states， 分别计算两个专家的输出
         """
-        # 第一个专家的计算
         w3_output = self.w3_result1
-        w1_output = self.activation(torch.matmul(hidden_states, self.w1_gpu.T))
-        # w2 = self.w2_gpu.T
-        hidden_states_expert0 = torch.matmul(w1_output * w3_output, self.w2_gpu)
+        w1_output = self.activation(torch.matmul(hidden_states, self.w_gpu[0].T))
+        hidden_states_expert0 = torch.matmul(w1_output * w3_output, self.w_gpu[1])
 
         # 第二个专家的计算
         w3_output_expert1 = self.w3_result2
-        w1_output_expert1 = self.activation(torch.matmul(hidden_states, self.w1_gpu_expert1.T))
-        # w2_expert1 = self.w2_gpu_expert1.T
-        hidden_states_expert1 = torch.matmul(w1_output_expert1 * w3_output_expert1, self.w2_gpu_expert1)
+        w1_output_expert1 = self.activation(torch.matmul(hidden_states, self.w_gpu[2].T))
+        hidden_states_expert1 = torch.matmul(w1_output_expert1 * w3_output_expert1, self.w_gpu[3])
 
-        final_hidden_states = hidden_states_expert0* self.expert0_weight + hidden_states_expert1* self.expert1_weight
-        
+        final_hidden_states = hidden_states_expert0 * self.expert0_weight + hidden_states_expert1 * self.expert1_weight
         return final_hidden_states
                         
 def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9):
@@ -200,14 +180,8 @@ class PipelineLLM:
         stream = self.stream0 if buffer_index == 0 else self.stream1
 
         buffer.load_expert_weights(expert_weights)
-        ### 实际上是赋指针进去，驻留在GPU上面的
-        buffer.load_w3_weight(cpu_mlp, cpu_mlp_expert1)
-
         # 异步加载参数
-        ### todo ： 把up计算的结果一并传入
-        up_result1 = buffer.w3_gpu(hidden_states)
-        up_result2 = buffer.w3_gpu_expert1(hidden_states)
-        buffer.load_from_cpu(cpu_mlp, cpu_mlp_expert1, stream, up_result1, up_result2)
+        buffer.load_from_cpu(cpu_mlp, cpu_mlp_expert1, stream, hidden_states)
 
     def _replace_forward_methods(self):
         """
@@ -284,13 +258,14 @@ class PipelineLLM:
                     hidden_states = layer.post_attention_layernorm(hidden_states)
                     
                     if sequence_length > 1:
-                        # print("in prefill layer ", layer_idx)
+                        print("in prefill layer ", layer_idx)
                         # 对于prefill阶段，仅将experts加载到GPU计算
                         experts = layer.block_sparse_moe.experts
 
                         # 将experts移动到GPU
-                        for expert in experts:
-                            expert.cuda(0)
+                        if layer_idx != 0:
+                            for expert in experts:
+                                expert.cuda(0)
 
                         # 在GPU上进行MoE计算（gate保持在CPU）
                         final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
@@ -298,7 +273,8 @@ class PipelineLLM:
                         # 计算完成后将experts移回CPU
                         if layer_idx != 0:
                             for expert in experts:
-                                expert.to('cpu')
+                                expert.w1.to('cpu')
+                                expert.w2.to('cpu')
                     else:
                         # batch_size, sequence_length, hidden_dim = hidden_states.shape
                         hidden_states_flat = hidden_states.view(-1, hidden_dim)
