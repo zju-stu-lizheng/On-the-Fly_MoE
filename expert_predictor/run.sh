@@ -1,1 +1,1 @@
-python training.py --epochs 4 > train.out
+python training.py --epochs 20 > train.out

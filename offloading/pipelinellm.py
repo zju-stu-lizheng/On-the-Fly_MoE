@@ -6,13 +6,14 @@ import json
 import torch.nn.functional as F
 
 class Expert_Predictor(nn.Module):
-    def __init__(self, layer_idx: int = 0, input_dim: int = 4096, hidden_dim: int = 512, output_dim: int = 8, dtype = torch.float16):
+    def __init__(self, layer_idx: int = 0, input_dim: int = 4096, hidden_dim: int = 512, output_dim: int = 8, dtype = torch.float16,
+                 training_epoch: int = 10):
         super(Expert_Predictor, self).__init__()
         self.linear1 = nn.Linear(input_dim, hidden_dim, dtype=dtype)
         self.activation = nn.SiLU() 
         self.linear2 = nn.Linear(hidden_dim,output_dim, dtype=dtype) 
 
-        self.load_state_dict(torch.load(f'/home/bcds/On-the-Fly_MoE_Inference/expert_predictor/training/{layer_idx}.pth'))
+        self.load_state_dict(torch.load(f'/home/bcds/On-the-Fly_MoE_Inference/expert_predictor/training/{layer_idx}-{training_epoch}.pth'))
 
     def forward(self, hidden_states):
         hidden_states = self.linear1(hidden_states)
@@ -152,22 +153,28 @@ class CachedMLP(nn.Module):
                     
 
 class PipelineLLM:
-    def __init__(self, llm, cached_mlps):
+    def __init__(self, llm, cached_mlps, start_ep_idx = 1, end_ep_idx = 3, 
+                 training_epoch: int = 10, print_layer_info = False):
         """
         初始化 PipelineLLM，替换模型每一层的 forward 方法。
         
         参数:
             llm: 原始的大模型
             cached_mlps: 两个 CachedMLP 实例列表
+            start_ep_idx, end_ep_idx: [sidx, eidx] 需要使用训练的router范围，闭区间
+            training_epoch: router的训练轮次
         """
         self.llm = llm
         self.cached_mlps = cached_mlps  # [buffer0, buffer1]
         self.num_layers = len(llm.model.layers)
         self.lock = threading.Lock()
         self.use_buffer0 = True  # 标记当前使用哪个缓冲区
+        self.print_layer_info = print_layer_info
 
         self.stream0 = torch.cuda.Stream()
         self.stream1 = torch.cuda.Stream()
+
+        self.stream_conflict = torch.cuda.Stream()
 
         self.top_k = 2
         self.activation = nn.SiLU()
@@ -179,10 +186,10 @@ class PipelineLLM:
 
         #### 增加[1,3]的Expert_Predictor
         self.eps = []
-        self.start_layer = 1
-        self.end_layer = 3
+        self.start_layer = start_ep_idx
+        self.end_layer = end_ep_idx
         for i in range(self.start_layer, self.end_layer+1):
-            ep = Expert_Predictor(layer_idx=i).cuda(0)
+            ep = Expert_Predictor(layer_idx=i, training_epoch=training_epoch).cuda(0)
             self.eps.append(ep)
 
         self._replace_forward_methods()
@@ -258,13 +265,13 @@ class PipelineLLM:
             cpu_mlp_new = new_expert.cpu_mlp
             
             # 只更新需要加载的专家权重
-            buffer.load_conflict_cpu(cpu_mlp_new, self.stream1, hidden_states, replace_idx)
+            buffer.load_conflict_cpu(cpu_mlp_new, self.stream_conflict, hidden_states, replace_idx)
             
         else:
             # print(f"reloading 2 experts, {expert_ids[:]}")
             self.total_reload_experts += 2
             # 需要加载两个专家，直接调用原始方法
-            self._load_layer(layer_idx, buffer, expert_ids, self.stream1, hidden_states)
+            self._load_layer(layer_idx, buffer, expert_ids, self.stream_conflict, hidden_states)
 
     def _replace_forward_methods(self):
         """
@@ -282,17 +289,68 @@ class PipelineLLM:
                         layer=layer,
                         layer_idx=i):
                 batch_size, sequence_length, hidden_dim = hidden_states.shape
-                
-                if sequence_length == 1:
+
+                # 处理当前层
+                residual = hidden_states
+                hidden_states = layer.input_layernorm(hidden_states)
+
+                # Self Attention
+                hidden_states, self_attn_weights, present_key_value = layer.self_attn(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                )
+                hidden_states = residual + hidden_states
+
+                # Fully Connected
+                residual = hidden_states
+                hidden_states = layer.post_attention_layernorm(hidden_states)
+
+                if sequence_length > 1:
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    start_event.record()
+                    if self.print_layer_info:
+                        print("in prefill layer ", layer_idx)
+                    # 对于prefill阶段，仅将experts加载到GPU计算
+                    experts = layer.block_sparse_moe.experts
+
+                    # 将experts移动到GPU
+                    if layer_idx != 0:
+                        for expert in experts:
+                            expert.cuda(0)
+
+                    # 在GPU上进行MoE计算（gate保持在CPU）
+                    final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
+                    ##### todo: 修改原有的forward，不进行reshape
+
+                    # 计算完成后将experts移回CPU
+                    if layer_idx != 0:
+                        for expert in experts:
+                            expert.w1.to('cpu')
+                            expert.w2.to('cpu')
+                    end_event.record()
+                    torch.cuda.synchronize()
+
+                    # 计算时间
+                    self.prefill_time += start_event.elapsed_time(end_event) / 1000 
+                else:
                     #### decode phase ####
+                    ### 加载应该在atten算完之后[专家预测的才更准]
                     # 选择当前使用的缓冲区
                     current_buffer = self.cached_mlps[0] if self.use_buffer0 else self.cached_mlps[1]
+                    cur_stream = self.stream0 if self.use_buffer0 else self.stream1
                     
                     next_buffer_index = 1 if self.use_buffer0 else 0
                     next_layer_idx = layer_idx + 1
                     if next_layer_idx < self.num_layers:
                         ### 使用下一个缓冲区进行加载
                         next_buffer = self.cached_mlps[next_buffer_index]
+                        stream = self.stream1 if self.use_buffer0 else self.stream0
 
                         # 预加载下一层的参数
                         # batch_size, sequence_length, hidden_dim = hidden_states.shape
@@ -314,61 +372,13 @@ class PipelineLLM:
                             next_layer_idx,
                             buffer=next_buffer,
                             expert_ids=selected_experts[0],
-                            stream=self.stream0,
+                            stream=stream,
                             hidden_states=hidden_states,
                         )
                         hidden_states = hidden_states.reshape(batch_size, sequence_length, hidden_dim)
 
                         # 切换缓冲区
                         self.use_buffer0 = not self.use_buffer0
-
-                # 处理当前层
-                residual = hidden_states
-                hidden_states = layer.input_layernorm(hidden_states)
-
-                # Self Attention
-                hidden_states, self_attn_weights, present_key_value = layer.self_attn(
-                    hidden_states=hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                )
-                hidden_states = residual + hidden_states
-
-                # Fully Connected
-                residual = hidden_states
-                hidden_states = layer.post_attention_layernorm(hidden_states)
-                
-                if sequence_length > 1:
-                    start_event = torch.cuda.Event(enable_timing=True)
-                    end_event = torch.cuda.Event(enable_timing=True)
-                    start_event.record()
-                    # print("in prefill layer ", layer_idx)
-                    # 对于prefill阶段，仅将experts加载到GPU计算
-                    experts = layer.block_sparse_moe.experts
-
-                    # 将experts移动到GPU
-                    if layer_idx != 0:
-                        for expert in experts:
-                            expert.cuda(0)
-
-                    # 在GPU上进行MoE计算（gate保持在CPU）
-                    final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
-
-                    # 计算完成后将experts移回CPU
-                    if layer_idx != 0:
-                        for expert in experts:
-                            expert.w1.to('cpu')
-                            expert.w2.to('cpu')
-                    end_event.record()
-                    torch.cuda.synchronize()
-
-                    # 计算时间
-                    self.prefill_time += start_event.elapsed_time(end_event) / 1000 
-                else:
                     # print("in decode layer", layer_idx)
                     hidden_states = hidden_states.view(-1, hidden_dim)
                     ### 根据router计算需要使用的专家 ###
@@ -387,7 +397,7 @@ class PipelineLLM:
                     ## tensor([6, 7], device='cuda:0')
                     if layer_idx > 0:
                         ### 等待完全加载
-                        self.stream0.synchronize()  # 等待 self.stream0(传下一层的) 中的所有操作完成
+                        cur_stream.synchronize()  # 等待 cur_stream 中的所有操作完成
                         ### 判断加载是否正确
                         predict_experts = current_buffer.get_predict_experts()
                         
@@ -400,7 +410,7 @@ class PipelineLLM:
                                 expert_ids=expert_ids,
                                 hidden_states=hidden_states,
                             )
-                            self.stream1.synchronize()  # 等待当前层的参数传递                          
+                            self.stream_conflict.synchronize()  # 等待当前层的参数传递                          
                         
                         ### 使用当前缓冲区进行 MLP 计算 ###
                         final_hidden_states = current_buffer(hidden_states, expert_weights, expert_ids)

@@ -144,7 +144,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, epochs=25
 			# 调用 scaler.step() 来更新模型权重，并调用 scaler.update() 准备下一步
 			scaler.step(optimizer)
 			scaler.update()
-		if epoch % 2 == 0:
+		if epoch % 5 == 0:
 			model.eval()
 			eval_model(model, val_loader,)
 			torch.save(model.state_dict(), f"./training/{layeridx}-{epoch}.pth")
@@ -177,7 +177,8 @@ class SimpleLinearModel(nn.Module):
 
 
 def train_ep(args):
-	for i in range(1, 4):
+	for i in [6,7,8,9,31]:
+	# for i in range(1, 4):
 		print("layer ", i)
 		file_names = [f'merge/a2ef_{i}_{j}.pth' for j in range(10)]
 		dataset = CustomDataset(file_paths=file_names)
