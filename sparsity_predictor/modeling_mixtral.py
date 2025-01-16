@@ -776,13 +776,38 @@ class MixtralBLockSparseTop2MLP(nn.Module):
         # if not profile_threshold:
         self.up_threshold = torch.tensor(up_th[self.layer_idx][self.expert_idx])
 
+        self.count_sum = 0
+        self.token_sum = 0
         self.act_fn = ACT2FN[config.hidden_act]
+    
+    def print_ratio(self):
+        """
+        print the average of self.ratio
+        """ 
+        if self.token_sum == 0:
+            print("counting start....")
+            print(self.up_threshold.device)
+            return
+        print(f'layer {self.layeridx} expert {self.expertidx} ratio: {self.count_sum/self.token_sum:.4f}')
+        self.count_sum = 0
+        self.token_sum = 0
+
+    def get_ratio(self) -> float:
+        """
+        print the average of self.ratio
+        """ 
+        if self.token_sum == 0:
+            print("counting start....")
+            print(self.up_threshold.device)
+            return
+        return self.count_sum/self.token_sum
 
     def forward(self, hidden_states, routing_weights, preatt_score=None):
         # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
         activation = self.act_fn(self.w1(hidden_states)) 
         if preatt_score != None:
-            v = torch.abs(activation*self.w3(preatt_score))
+            up_result = self.w3(preatt_score)
+            v = torch.abs(up_result)
 
         global th
         if profile_mode:
@@ -804,12 +829,19 @@ class MixtralBLockSparseTop2MLP(nn.Module):
             current_hidden_states = activation * self.w3(hidden_states)
         else:
             if self.layer_idx != 0:
-                mask = (v.to(hidden_states.device) >= self.up_threshold.to(hidden_states.device)).to(hidden_states.dtype)
+                # _, indices1 = torch.topk(v, self.activenum, dim=1)
+                # indices1 = indices1[0]
+                # mask = (v.to(hidden_states.device) >= self.up_threshold.to(hidden_states.device)).to(hidden_states.dtype)
+                up_proj_states = torch.where(v > self.up_threshold.to(hidden_states.device), up_result, 0.0, )
+                ### Calculate actual preserved ratio
+                true_ratio = (up_proj_states != 0).sum().item()
+                self.count_sum += true_ratio
+                self.token_sum += up_proj_states.numel()
             # #### 动态预测数据采集
             # if profile_sparsity and self.layer_idx == skip_layer_idx:
             #     dataset_x[self.expert_idx].append(preatt_score)
             #     dataset_y[self.expert_idx].append(v)
-                current_hidden_states = torch.mul(self.w3(hidden_states), mask) * torch.mul(activation, mask)
+                current_hidden_states = up_proj_states * activation
             else:
                 current_hidden_states = self.w3(hidden_states) * activation
         current_hidden_states = self.w2(current_hidden_states)
