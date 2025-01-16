@@ -799,15 +799,16 @@ class MixtralBLockSparseTop2MLP(nn.Module):
         if self.token_sum == 0:
             print("counting start....")
             print(self.up_threshold.device)
-            return
+            return 0
         return self.count_sum/self.token_sum
 
     def forward(self, hidden_states, routing_weights, preatt_score=None):
         # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
         activation = self.act_fn(self.w1(hidden_states)) 
+        up_result = self.w3(hidden_states)
         if preatt_score != None:
-            up_result = self.w3(preatt_score)
-            v = torch.abs(up_result)
+            up_pre_result = self.w3(preatt_score)
+            v = torch.abs(up_pre_result)
 
         global th
         if profile_mode:
@@ -843,7 +844,7 @@ class MixtralBLockSparseTop2MLP(nn.Module):
             #     dataset_y[self.expert_idx].append(v)
                 current_hidden_states = up_proj_states * activation
             else:
-                current_hidden_states = self.w3(hidden_states) * activation
+                current_hidden_states = up_result * activation
         current_hidden_states = self.w2(current_hidden_states)
         return routing_weights * current_hidden_states
 
