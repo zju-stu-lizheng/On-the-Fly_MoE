@@ -1,0 +1,1 @@
+python training.py --epochs 4 > train.out

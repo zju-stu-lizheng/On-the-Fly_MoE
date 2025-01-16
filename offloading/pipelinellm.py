@@ -5,6 +5,20 @@ import threading
 import json
 import torch.nn.functional as F
 
+class Expert_Predictor(nn.Module):
+    def __init__(self, layer_idx: int = 0, input_dim: int = 4096, hidden_dim: int = 512, output_dim: int = 8, dtype = torch.float16):
+        super(Expert_Predictor, self).__init__()
+        self.linear1 = nn.Linear(input_dim, hidden_dim, dtype=dtype)
+        self.activation = nn.SiLU() 
+        self.linear2 = nn.Linear(hidden_dim,output_dim, dtype=dtype) 
+
+        self.load_state_dict(torch.load(f'/home/bcds/On-the-Fly_MoE_Inference/expert_predictor/training/{layer_idx}.pth'))
+
+    def forward(self, hidden_states):
+        hidden_states = self.linear1(hidden_states)
+        hidden_states = self.activation(hidden_states)
+        return self.linear2(hidden_states)
+
 #### 增加专家preload失败后的重新加载
 class CachedMLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, dtype, sparsity: float = 0.2):
@@ -163,6 +177,14 @@ class PipelineLLM:
 
         self.prefill_time = 0
 
+        #### 增加[1,3]的Expert_Predictor
+        self.eps = []
+        self.start_layer = 1
+        self.end_layer = 3
+        for i in range(self.start_layer, self.end_layer+1):
+            ep = Expert_Predictor(layer_idx=i).cuda(0)
+            self.eps.append(ep)
+
         self._replace_forward_methods()
     
     def get_reload_experts(self):
@@ -273,12 +295,15 @@ class PipelineLLM:
                         next_buffer = self.cached_mlps[next_buffer_index]
 
                         # 预加载下一层的参数
-                        next_layer = self.llm.model.layers[next_layer_idx]
-                        router = next_layer.block_sparse_moe.gate
-
                         # batch_size, sequence_length, hidden_dim = hidden_states.shape
                         hidden_states = hidden_states.view(-1, hidden_dim)
                         # router_logits: (batch * sequence_length, n_experts)
+                        if self.start_layer <= next_layer_idx <= self.end_layer:
+                            ### 使用训练好的专家预测矩阵
+                            router = self.eps[next_layer_idx - self.start_layer]
+                        else:
+                            ### 使用next_layer_idx对应的gate矩阵
+                            router = self.llm.model.layers[next_layer_idx].block_sparse_moe.gate
                         router_logits = router(hidden_states)
 
                         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
@@ -407,12 +432,15 @@ class PipelineLLM:
             layer.forward = new_forward
 
 def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9):
+    ### todo: 加载训练后的router
+
     ### 其他部分存放在GPU上
     llm.model.embed_tokens.cuda(0)
     for i in range(len(llm.model.layers)):
         llm.model.layers[i].self_attn.cuda(0)
         llm.model.layers[i].input_layernorm.cuda(0)
         llm.model.layers[i].post_attention_layernorm.cuda(0)
+        ### 原始的gate
         llm.model.layers[i].block_sparse_moe.gate.cuda(0)
         for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
             llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(0)
