@@ -67,26 +67,6 @@ class CachedMLP(nn.Module):
             with torch.cuda.stream(stream):
                 self.w_gpu[2].copy_(self.sparse_w_cpu[2], non_blocking=True)
                 self.w_gpu[3].copy_(self.sparse_w_cpu[3], non_blocking=True)
-        # if replace_idx == 0:
-        #     # 更新CPU数据
-        #     self.w3_expert0 = cpu_mlp_new['w3']
-        #     self.sparse_w_cpu[0].copy_(cpu_mlp_new['w1'].data)
-        #     self.sparse_w_cpu[1].copy_(cpu_mlp_new['w2'].data)
-            
-        #     # 异步复制到GPU
-        #     with torch.cuda.stream(stream):
-        #         self.w_gpu[0].copy_(self.sparse_w_cpu[0], non_blocking=True)
-        #         self.w_gpu[1].copy_(self.sparse_w_cpu[1], non_blocking=True)
-        # else:
-        #     # 更新CPU数据
-        #     self.w3_expert1 = cpu_mlp_new['w3']
-        #     self.sparse_w_cpu[2].copy_(cpu_mlp_new['w1'].data)
-        #     self.sparse_w_cpu[3].copy_(cpu_mlp_new['w2'].data)
-            
-        #     # 异步复制到GPU
-        #     with torch.cuda.stream(stream):
-        #         self.w_gpu[2].copy_(self.sparse_w_cpu[2], non_blocking=True)
-        #         self.w_gpu[3].copy_(self.sparse_w_cpu[3], non_blocking=True)
 
     def load_from_cpu(self, cpu_mlp, cpu_mlp_expert1, stream: torch.cuda.Stream, hidden_states):
         """
@@ -100,33 +80,32 @@ class CachedMLP(nn.Module):
         ### 根据up计算的结果进行稀疏化
         self.w3_expert0 = cpu_mlp['w3']
         self.w3_expert1 = cpu_mlp_expert1['w3']
-        up_result1 = self.w3_expert0(hidden_states)
-        up_result2 = self.w3_expert1(hidden_states)
-        # 提取 up_result1 的值并计算 top-k 索引
+        up_result0 = self.w3_expert0(hidden_states)
+        up_result1 = self.w3_expert1(hidden_states)
+        # 提取 up_result0 的值并计算 top-k 索引
+        _, indices0 = torch.topk(torch.abs(up_result0), self.activenum, dim=1)  # 在第二个维度上取 top-k
+        indices0 = indices0[0].cpu()
+
         _, indices1 = torch.topk(torch.abs(up_result1), self.activenum, dim=1)  # 在第二个维度上取 top-k
-        indices1 = indices1[0].cpu()
+        indices1 = indices1[0].cpu() 
 
-        _, indices2 = torch.topk(torch.abs(up_result2), self.activenum, dim=1)  # 在第二个维度上取 top-k
-        indices2 = indices2[0].cpu() 
-
-        self.indices0 = indices1
-        self.indices1 = indices2
+        self.indices0 = indices0
+        self.indices1 = indices1
 
         # 使用列表索引更新CPU数据
-        self.sparse_w_cpu[0].copy_(cpu_mlp['w1'].data[indices1, :])
-        self.sparse_w_cpu[1].copy_(cpu_mlp['w2'].data[indices1, :])
-        self.sparse_w_cpu[2].copy_(cpu_mlp_expert1['w1'].data[indices2, :])
-        self.sparse_w_cpu[3].copy_(cpu_mlp_expert1['w2'].data[indices2, :])
+        self.sparse_w_cpu[0].copy_(cpu_mlp['w1'].data[indices0, :])
+        self.sparse_w_cpu[1].copy_(cpu_mlp['w2'].data[indices0, :])
 
-        # self.sparse_w_cpu[0].copy_(cpu_mlp['w1'].data)
-        # self.sparse_w_cpu[1].copy_(cpu_mlp['w2'].data)
-        # self.sparse_w_cpu[2].copy_(cpu_mlp_expert1['w1'].data)
-        # self.sparse_w_cpu[3].copy_(cpu_mlp_expert1['w2'].data)
-        
         # 异步复制到GPU
         with torch.cuda.stream(stream):
             self.w_gpu[0].copy_(self.sparse_w_cpu[0], non_blocking=True)
             self.w_gpu[1].copy_(self.sparse_w_cpu[1], non_blocking=True)
+
+        self.sparse_w_cpu[2].copy_(cpu_mlp_expert1['w1'].data[indices1, :])
+        self.sparse_w_cpu[3].copy_(cpu_mlp_expert1['w2'].data[indices1, :])
+        
+        # 异步复制到GPU
+        with torch.cuda.stream(stream):
             self.w_gpu[2].copy_(self.sparse_w_cpu[2], non_blocking=True)
             self.w_gpu[3].copy_(self.sparse_w_cpu[3], non_blocking=True)
 
@@ -138,11 +117,11 @@ class CachedMLP(nn.Module):
         """
         根据hidden_states， 分别计算两个专家的输出
         """
-        print(expert_weights, expert_ids)
-        print(self.expert_ids)
+        # print(expert_weights, expert_ids)
+        # print(self.expert_ids)
         ### 如果取出来的专家 第一个对不上，可能是预测的 1，2号专家顺序颠倒了，替换
         if self.expert_ids[0] != expert_ids[0]:
-            print("----replace expert weights")
+            # print("----replace expert weights")
             expert_weights[0], expert_weights[1] = expert_weights[1], expert_weights[0]
 
         w3_output = self.w3_expert0(hidden_states)[:, self.indices0]
@@ -179,17 +158,22 @@ class PipelineLLM:
         self.top_k = 2
         self.activation = nn.SiLU()
 
-        self._replace_forward_methods()
-
         # 用于统计时间的变量
         self.total_reload_experts = 0
+
+        self.prefill_time = 0
+
+        self._replace_forward_methods()
     
     def get_reload_experts(self):
-        return self.total_reload_experts
-
-    def print_reload_experts(self):
-        print("all reload experts are:", self.total_reload_experts)
+        tmp = self.total_reload_experts
         self.total_reload_experts = 0
+        return tmp
+
+    def get_prefill_time(self):
+        tmp = self.prefill_time
+        self.prefill_time = 0
+        return tmp
 
     def _load_layer(self, layer_idx, buffer, expert_ids, stream,
                     hidden_states):
@@ -224,7 +208,7 @@ class PipelineLLM:
             hidden_states: 输入hidden_states
         """
         predict_experts = buffer.get_predict_experts()
-        print(f"predict_experts in layer {layer_idx}: {predict_experts}")
+        # print(f"predict_experts in layer {layer_idx}: {predict_experts}")
         # 找出需要加载的新专家
         required_experts = set(expert_ids.tolist()) - set(predict_experts.tolist())
         
@@ -243,7 +227,7 @@ class PipelineLLM:
             # 更新专家ID
             buffer.load_expert_weights(new_expert_ids)
 
-            print(f"reloading 1 experts, {new_expert_id}")
+            # print(f"reloading 1 experts, {new_expert_id}")
             self.total_reload_experts += 1
             
             # 获取需要加载的专家
@@ -255,7 +239,7 @@ class PipelineLLM:
             buffer.load_conflict_cpu(cpu_mlp_new, self.stream1, hidden_states, replace_idx)
             
         else:
-            print(f"reloading 2 experts, {expert_ids[:]}")
+            # print(f"reloading 2 experts, {expert_ids[:]}")
             self.total_reload_experts += 2
             # 需要加载两个专家，直接调用原始方法
             self._load_layer(layer_idx, buffer, expert_ids, self.stream1, hidden_states)
@@ -334,6 +318,9 @@ class PipelineLLM:
                 hidden_states = layer.post_attention_layernorm(hidden_states)
                 
                 if sequence_length > 1:
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    start_event.record()
                     # print("in prefill layer ", layer_idx)
                     # 对于prefill阶段，仅将experts加载到GPU计算
                     experts = layer.block_sparse_moe.experts
@@ -351,6 +338,11 @@ class PipelineLLM:
                         for expert in experts:
                             expert.w1.to('cpu')
                             expert.w2.to('cpu')
+                    end_event.record()
+                    torch.cuda.synchronize()
+
+                    # 计算时间
+                    self.prefill_time += start_event.elapsed_time(end_event) / 1000 
                 else:
                     # print("in decode layer", layer_idx)
                     hidden_states = hidden_states.view(-1, hidden_dim)
