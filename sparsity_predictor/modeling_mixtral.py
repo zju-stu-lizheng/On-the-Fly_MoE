@@ -833,7 +833,12 @@ class MixtralBLockSparseTop2MLP(nn.Module):
                 # _, indices1 = torch.topk(v, self.activenum, dim=1)
                 # indices1 = indices1[0]
                 # mask = (v.to(hidden_states.device) >= self.up_threshold.to(hidden_states.device)).to(hidden_states.dtype)
-                up_proj_states = torch.where(v > self.up_threshold.to(hidden_states.device), up_result, 0.0, )
+                if self.layer_idx >= 15:
+                    up_proj_states = torch.where(v > self.up_threshold.to(hidden_states.device),
+                         up_pre_result, 0.0, )
+                else:
+                    up_proj_states = torch.where(v > self.up_threshold.to(hidden_states.device),
+                         up_result, 0.0, )
                 ### Calculate actual preserved ratio
                 true_ratio = (up_proj_states != 0).sum().item()
                 self.count_sum += true_ratio

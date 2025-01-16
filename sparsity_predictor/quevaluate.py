@@ -1,5 +1,7 @@
 import sys
 sys.path.append("../quantize")
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "False"
 import torch
 import math
 from modeling_mixtral import load_thresholds
