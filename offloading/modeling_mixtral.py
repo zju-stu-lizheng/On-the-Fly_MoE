@@ -615,12 +615,13 @@ class MixtralSparseMoeBlock(nn.Module):
     and memory on padding.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, layer_idx):
         super().__init__()
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.intermediate_size
         self.num_experts = config.num_local_experts
         self.top_k = config.num_experts_per_tok
+        self.layer_idx = layer_idx
 
         # gating
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
@@ -633,11 +634,15 @@ class MixtralSparseMoeBlock(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
+        # print(batch_size, sequence_length, hidden_dim)
         if self.training and self.jitter_noise > 0:
             hidden_states *= torch.empty_like(hidden_states).uniform_(1.0 - self.jitter_noise, 1.0 + self.jitter_noise)
         
         # Reshape to (batch_size * sequence_length, hidden_dim) for routing
         flat_hidden_states = hidden_states.view(-1, hidden_dim)
+        # if sequence_length == 1:
+        # with open("1.txt", "a") as f:
+        #     f.write(f"in {self.layer_idx} moeblock : {flat_hidden_states[:, :4]}")
         router_logits = self.gate(flat_hidden_states)
 
         # Get routing weights and selected experts
@@ -657,18 +662,23 @@ class MixtralSparseMoeBlock(nn.Module):
             # Get selected experts and their weights for this token
             current_weights = routing_weights[i]
             current_experts = selected_experts[i]
+
+            # if self.layer_idx == 0:
+            #     print(current_experts, current_state)
             
             # Accumulate results from each expert
             expert_output = torch.zeros_like(current_state)
             for expert_idx, weight in zip(current_experts, current_weights):
                 expert_layer = self.experts[expert_idx]
-                expert_output += expert_layer(current_state) * weight
+                expert_output += expert_layer(current_state.unsqueeze(0)).squeeze(0) * weight
             
             # Store result in final output tensor
             final_hidden_states[i] = expert_output
         
         final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-
+        # if sequence_length == 1:
+        # with open("1.txt", "a") as f:
+        #     f.write(f"after {self.layer_idx} moeblock : {final_hidden_states[:, :4]}")
         return final_hidden_states, router_logits
 
 
@@ -679,7 +689,7 @@ class MixtralDecoderLayer(nn.Module):
 
         self.self_attn = MIXTRAL_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
 
-        self.block_sparse_moe = MixtralSparseMoeBlock(config)
+        self.block_sparse_moe = MixtralSparseMoeBlock(config, layer_idx)
         self.input_layernorm = MixtralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = MixtralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 

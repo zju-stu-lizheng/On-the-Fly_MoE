@@ -1,5 +1,6 @@
 unuse/
 
+*.txt
 *.pt
 *.out
 *.json
