@@ -1,4 +1,4 @@
-# OMP_NUM_THREADS=16 CUDA_VISIBLE_DEVICES=0 python demo.py 
+# OMP_NUM_THREADS=16 CUDA_VISIBLE_DEVICES=3 python demo.py 
 import os
 # os.environ["CUDA_VISIBLE_DEVICES"] = "3, 4"
 os.environ["TOKENIZERS_PARALLELISM"] = "False"
@@ -15,7 +15,7 @@ with open('../path.json', 'r') as f:
     model_name = path['mixtral']
 
 save_dir = './hqqsaved'
-backend       = "bitblas" #'torchao_int4' #"torchao_int4" (4-bit only) or "gemlite" (4-bit + 2-bit)
+backend       = "gemlite" #'torchao_int4' #"torchao_int4" (4-bit only) or "gemlite" (4-bit + 2-bit)
 dtype = torch.bfloat16 if backend=="torchao_int4" else torch.float16
 tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir='./')
 tokenizer.pad_token = tokenizer.eos_token
@@ -60,8 +60,8 @@ HQQLinear.set_backend(HQQBackend.PYTORCH)
 
 
 # #Optimize
-# from hqq.utils.patching import prepare_for_inference
-# prepare_for_inference(llm, backend=backend, verbose=True)
+from hqq.utils.patching import prepare_for_inference
+prepare_for_inference(llm, backend=backend, verbose=True)
 
 
 import json

@@ -29,6 +29,8 @@ class CachedMLP(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.dtype = dtype
+        self.device = 'cuda:0'
+        self.device2 = 'cpu'
         print("active neural num ",self.activenum)
 
         self.activation = nn.SiLU()
@@ -41,16 +43,16 @@ class CachedMLP(nn.Module):
 
         # 将GPU缓存张量改为列表存储
         self.w_gpu = [
-            torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0') for _ in range(4)
+            torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device=self.device) for _ in range(4)
         ]  # [w1_gpu, w2_gpu, w1_gpu_expert1, w2_gpu_expert1]
 
         # 将Pinned Memory缓冲区改为列表存储
         self.sparse_w_cpu = [
-            torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu').pin_memory() for _ in range(4)
+            torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device=self.device2).pin_memory() for _ in range(4)
         ]  # [sparse_w1_cpu, sparse_w2_cpu, sparse_w1_cpu_expert1, sparse_w2_cpu_expert1]
 
         ### 增加两个专家序号
-        self.expert_ids = torch.tensor([0,1])
+        self.expert_ids = torch.tensor([0,1], device=self.device)
 
     def get_predict_experts(self):
         return self.expert_ids
@@ -126,7 +128,7 @@ class CachedMLP(nn.Module):
 
     def load_expert_weights(self, expert_ids):
         # print('loading next expert: ', expert_ids)   ## tensor([7, 6], device='cuda:0')
-        self.expert_ids = expert_ids
+        self.expert_ids.copy_(expert_ids)
 
     def forward(self, hidden_states, expert_weights, expert_ids):
         """
@@ -165,6 +167,7 @@ class PipelineLLM:
             training_epoch: router的训练轮次
         """
         self.llm = llm
+        self.device = 'cuda:0'
         self.cached_mlps = cached_mlps  # [buffer0, buffer1]
         self.num_layers = len(llm.model.layers)
         self.lock = threading.Lock()
@@ -248,10 +251,10 @@ class PipelineLLM:
             if predict_experts[0] in expert_ids:
                 replace_idx = 1   
                 ### 更新buffer中保存的专家序号
-                new_expert_ids = torch.tensor([predict_experts[0], new_expert_id])
+                new_expert_ids = torch.tensor([predict_experts[0], new_expert_id], device=self.device)
             else:
                 replace_idx = 0
-                new_expert_ids = torch.tensor([new_expert_id, predict_experts[1]])
+                new_expert_ids = torch.tensor([new_expert_id, predict_experts[1]], device=self.device)
 
             # 更新专家ID
             buffer.load_expert_weights(new_expert_ids)
@@ -323,11 +326,8 @@ class PipelineLLM:
                     if layer_idx != 0:
                         for expert in experts:
                             expert.cuda(0)
-
                     # 在GPU上进行MoE计算（gate保持在CPU）
                     final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
-                    ##### todo: 修改原有的forward，不进行reshape
-
                     # 计算完成后将experts移回CPU
                     if layer_idx != 0:
                         for expert in experts:
@@ -402,7 +402,8 @@ class PipelineLLM:
                         predict_experts = current_buffer.get_predict_experts()
                         
                         # 判断expert_ids和predict_experts是否包含相同数据（忽略顺序）
-                        if not torch.equal(torch.sort(expert_ids)[0], torch.sort(predict_experts)[0]):
+                        # if not torch.equal(torch.sort(expert_ids)[0], torch.sort(predict_experts)[0]):
+                        if not torch.equal((expert_ids[0] + expert_ids[1] * 10),(predict_experts[0] + predict_experts[1] * 10)):
                             ### 不吻合，重新加载
                             self._load_conflict_layer(
                                 layer_idx,

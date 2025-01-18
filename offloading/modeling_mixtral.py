@@ -899,6 +899,7 @@ class MixtralModel(MixtralPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        print('using atten...', config._attn_implementation)
         self.layers = nn.ModuleList(
             [MixtralDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
