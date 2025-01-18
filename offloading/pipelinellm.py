@@ -13,7 +13,7 @@ class Expert_Predictor(nn.Module):
         self.activation = nn.SiLU() 
         self.linear2 = nn.Linear(hidden_dim,output_dim, dtype=dtype) 
 
-        self.load_state_dict(torch.load(f'/home/bcds/On-the-Fly_MoE_Inference/expert_predictor/training/{layer_idx}-{training_epoch}.pth'))
+        self.load_state_dict(torch.load(f'../expert_predictor/training/{layer_idx}-{training_epoch}.pth'))
 
     def forward(self, hidden_states):
         hidden_states = self.linear1(hidden_states)
@@ -441,7 +441,7 @@ class PipelineLLM:
             # 替换forward方法
             layer.forward = new_forward
 
-def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9):
+def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9, backends='bitblas'):
     ### todo: 加载训练后的router
 
     ### 其他部分存放在GPU上
@@ -453,7 +453,17 @@ def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9):
         ### 原始的gate
         llm.model.layers[i].block_sparse_moe.gate.cuda(0)
         for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
-            llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(0)
+            if backends == 'bitblas':
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.W_q = \
+                    llm.model.layers[i].block_sparse_moe.experts[j].w3.W_q.to('cuda:0')
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.scale = \
+                    llm.model.layers[i].block_sparse_moe.experts[j].w3.scale.to('cuda:0')
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.zero = \
+                    llm.model.layers[i].block_sparse_moe.experts[j].w3.zero.to('cuda:0')
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.device = 'cuda:0'
+            else:
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(0)
+
     ### 第0层的专家存放在GPU上
     for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
         llm.model.layers[0].block_sparse_moe.experts[j].cuda(0)
