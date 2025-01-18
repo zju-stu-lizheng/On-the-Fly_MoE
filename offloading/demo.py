@@ -60,5 +60,62 @@ HQQLinear.set_backend(HQQBackend.PYTORCH)
 
 
 # #Optimize
-from hqq.utils.patching import prepare_for_inference
-prepare_for_inference(llm, backend=backend, verbose=True)
+# from hqq.utils.patching import prepare_for_inference
+# prepare_for_inference(llm, backend=backend, verbose=True)
+
+
+import json
+from datasets import load_dataset, Dataset
+from transformers import GenerationConfig
+
+input_length = 8
+MAX_LENGTH = input_length
+output_length = 16
+device_id = 0
+test_samples = 1
+
+def preprocess_data(data, tokenizer):
+	# 使用 tokenizer 将文本数据转换为模型输入
+	inputs = tokenizer(data, padding="max_length", truncation=True, max_length=MAX_LENGTH, return_tensors="pt")
+	inputs["labels"] = inputs.input_ids.clone()
+	return inputs
+
+generated_all, decode_time, prefill_time = 0, 0, 0
+# print("max output length is {}".format(output_length))
+text = "The future of AI is here, and "
+
+inputs = preprocess_data(text, tokenizer)
+# # 测试时间
+# start_event = torch.cuda.Event(enable_timing=True)
+# end_event = torch.cuda.Event(enable_timing=True)
+
+# 开始计时
+# torch.cuda.synchronize()
+# start_event.record()
+
+# 前向传播
+with torch.no_grad():
+    output = llm.generate(
+        input_ids=inputs["input_ids"].cuda(device_id),
+        attention_mask=inputs["attention_mask"].cuda(device_id),
+        max_length=input_length + output_length,  # 总长度为输入长度 + 输出长度
+        generation_config=GenerationConfig(do_sample=False),
+        pad_token_id=tokenizer.pad_token_id, 
+        # cache_implementation="static" ## moe not support
+    )
+
+# 结束计时
+# end_event.record()
+# torch.cuda.synchronize()
+
+# 计算时间
+# elapsed_time = start_event.elapsed_time(end_event) / 1000  # 转换为秒
+# decode_time += elapsed_time
+# print(f"Generated length: {len(output[0]) - input_length}", f"Time taken: {elapsed_time:.2f} s")
+# print(output)
+print(tokenizer.batch_decode(output, skip_special_tokens=True))
+
+# generated_all += (len(output[0]) - input_length -1)
+
+# timepertoken = (decode_time) / (generated_all)
+# print("decode phase speed:", '{:.4f}'.format(1/timepertoken) , ' token/s')
