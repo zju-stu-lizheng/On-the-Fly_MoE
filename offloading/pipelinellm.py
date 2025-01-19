@@ -170,7 +170,7 @@ class PipelineLLM:
         self.device = 'cuda:0'
         self.cached_mlps = cached_mlps  # [buffer0, buffer1]
         self.num_layers = len(llm.model.layers)
-        self.lock = threading.Lock()
+
         self.use_buffer0 = True  # 标记当前使用哪个缓冲区
         self.print_layer_info = print_layer_info
 
@@ -403,7 +403,8 @@ class PipelineLLM:
                         
                         # 判断expert_ids和predict_experts是否包含相同数据（忽略顺序）
                         # if not torch.equal(torch.sort(expert_ids)[0], torch.sort(predict_experts)[0]):
-                        if not torch.equal((expert_ids[0] + expert_ids[1] * 10),(predict_experts[0] + predict_experts[1] * 10)):
+
+                        if not torch.equal((1 << expert_ids[0]) + (1 << expert_ids[1] ),(1 << predict_experts[0]) + (1 << predict_experts[1])):
                             ### 不吻合，重新加载
                             self._load_conflict_layer(
                                 layer_idx,
