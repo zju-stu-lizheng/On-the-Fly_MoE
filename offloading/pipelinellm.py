@@ -70,6 +70,7 @@ class CachedMLP(nn.Module):
         同样地，这里也只复制指针
         """
         ### 也需要sleep一下，这里模拟需要补充代价
+        # sleep(1)
         if replace_idx == 0:
             self.w1_expert0 = cpu_mlp_new['w1']
             self.w2_expert0 = cpu_mlp_new['w2']
