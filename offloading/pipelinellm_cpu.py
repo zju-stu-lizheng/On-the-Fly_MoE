@@ -13,7 +13,7 @@ class Expert_Predictor(nn.Module):
         self.activation = nn.SiLU() 
         self.linear2 = nn.Linear(hidden_dim,output_dim, dtype=dtype) 
 
-        self.load_state_dict(torch.load(f'/home/bcds/On-the-Fly_MoE_Inference/expert_predictor/training/{layer_idx}-{training_epoch}.pth'))
+        self.load_state_dict(torch.load(f'../expert_predictor/training/{layer_idx}-{training_epoch}.pth'))
 
     def forward(self, hidden_states):
         hidden_states = self.linear1(hidden_states)
@@ -29,6 +29,8 @@ class CachedMLP(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.dtype = dtype
+        self.device = 'cuda:0'
+        self.device2 = 'cpu'
         print("active neural num ",self.activenum)
 
         self.activation = nn.SiLU()
@@ -36,21 +38,21 @@ class CachedMLP(nn.Module):
         self.w3_expert0 = None
         self.w3_expert1 = None
 
-        self.indices0 = None
-        self.indices1 = None
+        self.indices0 = torch.empty((self.activenum), dtype=torch.int, device=self.device)
+        self.indices1 = torch.empty((self.activenum), dtype=torch.int, device=self.device)
 
         # 将GPU缓存张量改为列表存储
         self.w_gpu = [
-            torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cuda:0') for _ in range(4)
+            torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device=self.device) for _ in range(4)
         ]  # [w1_gpu, w2_gpu, w1_gpu_expert1, w2_gpu_expert1]
 
         # 将Pinned Memory缓冲区改为列表存储
         self.sparse_w_cpu = [
-            torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device='cpu').pin_memory() for _ in range(4)
+            torch.empty((self.activenum, self.input_dim), dtype=self.dtype, device=self.device2).pin_memory() for _ in range(4)
         ]  # [sparse_w1_cpu, sparse_w2_cpu, sparse_w1_cpu_expert1, sparse_w2_cpu_expert1]
 
         ### 增加两个专家序号
-        self.expert_ids = torch.tensor([0,1])
+        self.expert_ids = torch.tensor([0,1], device=self.device)
 
     def get_predict_experts(self):
         return self.expert_ids
@@ -58,11 +60,12 @@ class CachedMLP(nn.Module):
     def load_conflict_cpu(self, cpu_mlp_new, stream: torch.cuda.Stream, hidden_states, replace_idx):
         # 只更新需要加载的专家权重
         _, indices = torch.topk(torch.abs(cpu_mlp_new['w3'](hidden_states)), self.activenum, dim=1)
-        indices = indices[0].cpu()
+        indices = indices[0]
         if replace_idx == 0:
             # 更新CPU数据
             self.w3_expert0 = cpu_mlp_new['w3']
-            self.indices0 = indices
+            self.indices0.copy_(indices)
+            indices = indices.cpu()
 
             self.sparse_w_cpu[0].copy_(cpu_mlp_new['w1'].data[indices, :])
             self.sparse_w_cpu[1].copy_(cpu_mlp_new['w2'].data[indices, :])
@@ -74,7 +77,9 @@ class CachedMLP(nn.Module):
         else:
             # 更新CPU数据
             self.w3_expert1 = cpu_mlp_new['w3']
-            self.indices1 = indices
+            self.indices1.copy_(indices)
+            indices = indices.cpu()
+
             self.sparse_w_cpu[2].copy_(cpu_mlp_new['w1'].data[indices, :])
             self.sparse_w_cpu[3].copy_(cpu_mlp_new['w2'].data[indices, :])
             
@@ -99,13 +104,15 @@ class CachedMLP(nn.Module):
         up_result1 = self.w3_expert1(hidden_states)
         # 提取 up_result0 的值并计算 top-k 索引
         _, indices0 = torch.topk(torch.abs(up_result0), self.activenum, dim=1)  # 在第二个维度上取 top-k
-        indices0 = indices0[0].cpu()
-
+        
         _, indices1 = torch.topk(torch.abs(up_result1), self.activenum, dim=1)  # 在第二个维度上取 top-k
-        indices1 = indices1[0].cpu() 
 
-        self.indices0 = indices0
-        self.indices1 = indices1
+        ### in device for next Wup sparsity()
+        self.indices0.copy_(indices0[0])
+        self.indices1.copy_(indices1[0])
+
+        indices0 = indices0[0].cpu()
+        indices1 = indices1[0].cpu() 
 
         # 使用列表索引更新CPU数据
         self.sparse_w_cpu[0].copy_(cpu_mlp['w1'].data[indices0, :])
@@ -126,7 +133,7 @@ class CachedMLP(nn.Module):
 
     def load_expert_weights(self, expert_ids):
         # print('loading next expert: ', expert_ids)   ## tensor([7, 6], device='cuda:0')
-        self.expert_ids = expert_ids
+        self.expert_ids.copy_(expert_ids)
 
     def forward(self, hidden_states, expert_weights, expert_ids):
         """
@@ -144,7 +151,7 @@ class CachedMLP(nn.Module):
         hidden_states_expert0 = torch.matmul(w1_output * w3_output, self.w_gpu[1])
 
         # 第二个专家的计算
-        w3_output_expert1 = self.w3_expert1(hidden_states)[:, self.indices0]
+        w3_output_expert1 = self.w3_expert1(hidden_states)[:, self.indices1]
         w1_output_expert1 = self.activation(torch.matmul(hidden_states, self.w_gpu[2].T))
         hidden_states_expert1 = torch.matmul(w1_output_expert1 * w3_output_expert1, self.w_gpu[3])
 
@@ -165,9 +172,10 @@ class PipelineLLM:
             training_epoch: router的训练轮次
         """
         self.llm = llm
+        self.device = 'cuda:0'
         self.cached_mlps = cached_mlps  # [buffer0, buffer1]
         self.num_layers = len(llm.model.layers)
-        self.lock = threading.Lock()
+
         self.use_buffer0 = True  # 标记当前使用哪个缓冲区
         self.print_layer_info = print_layer_info
 
@@ -248,10 +256,10 @@ class PipelineLLM:
             if predict_experts[0] in expert_ids:
                 replace_idx = 1   
                 ### 更新buffer中保存的专家序号
-                new_expert_ids = torch.tensor([predict_experts[0], new_expert_id])
+                new_expert_ids = torch.tensor([predict_experts[0], new_expert_id], device=self.device)
             else:
                 replace_idx = 0
-                new_expert_ids = torch.tensor([new_expert_id, predict_experts[1]])
+                new_expert_ids = torch.tensor([new_expert_id, predict_experts[1]], device=self.device)
 
             # 更新专家ID
             buffer.load_expert_weights(new_expert_ids)
@@ -323,11 +331,8 @@ class PipelineLLM:
                     if layer_idx != 0:
                         for expert in experts:
                             expert.cuda(0)
-
                     # 在GPU上进行MoE计算（gate保持在CPU）
                     final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
-                    ##### todo: 修改原有的forward，不进行reshape
-
                     # 计算完成后将experts移回CPU
                     if layer_idx != 0:
                         for expert in experts:
@@ -402,7 +407,9 @@ class PipelineLLM:
                         predict_experts = current_buffer.get_predict_experts()
                         
                         # 判断expert_ids和predict_experts是否包含相同数据（忽略顺序）
-                        if not torch.equal(torch.sort(expert_ids)[0], torch.sort(predict_experts)[0]):
+                        # if not torch.equal(torch.sort(expert_ids)[0], torch.sort(predict_experts)[0]):
+
+                        if not torch.equal((1 << expert_ids[0]) + (1 << expert_ids[1] ),(1 << predict_experts[0]) + (1 << predict_experts[1])):
                             ### 不吻合，重新加载
                             self._load_conflict_layer(
                                 layer_idx,
@@ -441,25 +448,38 @@ class PipelineLLM:
             # 替换forward方法
             layer.forward = new_forward
 
-def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9):
-    ### todo: 加载训练后的router
-
-    ### 其他部分存放在GPU上
-    llm.model.embed_tokens.cuda(0)
+def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9, backends='bitblas', 
+    device='cuda:0', device_map=None):
+    device_number = int(device[-1])
+    ### 其他部分存放在device上
+    llm.model.embed_tokens.cuda(device_number)
     for i in range(len(llm.model.layers)):
-        llm.model.layers[i].self_attn.cuda(0)
-        llm.model.layers[i].input_layernorm.cuda(0)
-        llm.model.layers[i].post_attention_layernorm.cuda(0)
+        llm.model.layers[i].self_attn.cuda(device_number)
+        llm.model.layers[i].input_layernorm.cuda(device_number)
+        llm.model.layers[i].post_attention_layernorm.cuda(device_number)
         ### 原始的gate
-        llm.model.layers[i].block_sparse_moe.gate.cuda(0)
+        llm.model.layers[i].block_sparse_moe.gate.cuda(device_number)
         for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
-            llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(0)
+            if backends == 'gemlite':
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(device_number)
+            elif backends == "bitblas":
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.W_q = \
+                    llm.model.layers[i].block_sparse_moe.experts[j].w3.W_q.cuda(device_number)
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.scale = \
+                    llm.model.layers[i].block_sparse_moe.experts[j].w3.scale.cuda(device_number)
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.zero = \
+                    llm.model.layers[i].block_sparse_moe.experts[j].w3.zero.cuda(device_number)
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.device = device
+            else:
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(device_number)
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.device = device
+
     ### 第0层的专家存放在GPU上
     for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
-        llm.model.layers[0].block_sparse_moe.experts[j].cuda(0)
+        llm.model.layers[0].block_sparse_moe.experts[j].cuda(device_number)
 
-    llm.model.norm.cuda(0)
-    llm.lm_head.cuda(0)
+    llm.model.norm.cuda(device_number)
+    llm.lm_head.cuda(device_number)
     
     # 创建两个共享的CachedMLP实例
     buffer0 = CachedMLP(
