@@ -9,12 +9,12 @@ from transformers import AutoTokenizer
 
 MAX_LENGTH = 512
 
-def get_model(model_path):
+def get_model(model_path, device_map='auto'):
     sparsity=0
     if 'Llama' in model_path:
         model = LlamaForCausalLM.from_pretrained(
             model_path,
-            device_map='auto',
+            device_map=device_map,
             use_cache=False,
             torch_dtype=torch.float16,
         )
@@ -22,7 +22,7 @@ def get_model(model_path):
     else:
         model = MixtralForCausalLM.from_pretrained(
             model_path,
-            device_map='auto',
+            device_map=device_map,
             use_cache=False,
             torch_dtype=torch.bfloat16,
             # attn_implementation="flash_attention_2"

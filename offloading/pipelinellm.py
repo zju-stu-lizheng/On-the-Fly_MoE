@@ -120,13 +120,12 @@ class CachedMLP(nn.Module):
         _, indices0 = torch.topk(torch.abs(up_result0), self.activenum, dim=1)  # 在第二个维度上取 top-k
         _, indices1 = torch.topk(torch.abs(up_result1), self.activenum, dim=1)  # 在第二个维度上取 top-k
     
+        self.indices0 = indices0
+        self.indices1 = indices1
         cur_device = self.device_map[layer_idx]
         indices0 = indices0[0].to(cur_device)
         indices1 = indices1[0].to(cur_device) 
 
-
-        self.indices0 = indices0
-        self.indices1 = indices1
         if self.use_pin:
             # 使用列表索引更新CPU数据
             self.sparse_w_cpu[0].copy_(cpu_mlp['w1'].data[indices0, :])
@@ -147,10 +146,14 @@ class CachedMLP(nn.Module):
         else:
             # 异步复制到GPU
             with torch.cuda.stream(stream):
-                self.w_gpu[0].copy_(cpu_mlp['w1'].data[indices0, :], non_blocking=True)
-                self.w_gpu[1].copy_(cpu_mlp['w2'].data[indices0, :], non_blocking=True)
-                self.w_gpu[2].copy_(cpu_mlp_expert1['w1'].data[indices1, :], non_blocking=True)
-                self.w_gpu[3].copy_(cpu_mlp_expert1['w2'].data[indices1, :], non_blocking=True)
+                w01 = cpu_mlp['w1'].data[indices0, :]
+                w02 = cpu_mlp['w2'].data[indices0, :]
+                w11 = cpu_mlp_expert1['w1'].data[indices1, :]
+                w12 = cpu_mlp_expert1['w2'].data[indices1, :]
+                self.w_gpu[0].copy_(w01, non_blocking=True)
+                self.w_gpu[1].copy_(w02, non_blocking=True)
+                self.w_gpu[2].copy_(w11, non_blocking=True)
+                self.w_gpu[3].copy_(w12, non_blocking=True)
 
     def load_expert_weights(self, expert_ids):
         # print('loading next expert: ', expert_ids)   ## tensor([7, 6], device='cuda:0')
@@ -202,8 +205,12 @@ class PipelineLLM:
         self.use_buffer0 = True  # 标记当前使用哪个缓冲区
         self.print_layer_info = print_layer_info
 
-        self.stream0 = torch.cuda.Stream(device=device)
-        self.stream1 = torch.cuda.Stream(device=device)
+        # self.stream0 = torch.cuda.Stream(device=device)
+        # self.stream1 = torch.cuda.Stream(device=device)
+        self.stream0 = {'cuda:1':torch.cuda.Stream(device='cuda:1'),
+                        'cuda:2':torch.cuda.Stream(device='cuda:2'),}
+        self.stream1 = {'cuda:1':torch.cuda.Stream(device='cuda:1'),
+                        'cuda:2':torch.cuda.Stream(device='cuda:2'),}
 
         self.stream_conflict = torch.cuda.Stream(device=device)
 
@@ -287,7 +294,7 @@ class PipelineLLM:
             # 更新专家ID
             buffer.load_expert_weights(new_expert_ids)
 
-            # print(f"reloading 1 experts, {new_expert_id}")
+            print(f"reloading 1 experts, {new_expert_id}")
             self.total_reload_experts += 1
             
             # 获取需要加载的专家
@@ -299,7 +306,7 @@ class PipelineLLM:
             buffer.load_conflict_cpu(cpu_mlp_new, self.stream_conflict, hidden_states, replace_idx, layer_idx=layer_idx)
             
         else:
-            # print(f"reloading 2 experts, {expert_ids[:]}")
+            print(f"reloading 2 experts, {expert_ids[:]}")
             self.total_reload_experts += 2
             # 需要加载两个专家，直接调用原始方法
             self._load_layer(layer_idx, buffer, expert_ids, self.stream_conflict, hidden_states)
@@ -401,7 +408,7 @@ class PipelineLLM:
                             next_layer_idx,
                             buffer=next_buffer,
                             expert_ids=selected_experts[0],
-                            stream=stream,
+                            stream=stream[self.device_map[next_layer_idx]],
                             hidden_states=hidden_states,
                         )
                         hidden_states = hidden_states.reshape(batch_size, sequence_length, hidden_dim)
@@ -426,7 +433,8 @@ class PipelineLLM:
                     ## tensor([6, 7], device='cuda:0')
                     if layer_idx > 0:
                         ### 等待完全加载
-                        cur_stream.synchronize()  # 等待 cur_stream 中的所有操作完成
+                        cur_device = self.device_map[layer_idx]
+                        cur_stream[cur_device].synchronize()  # 等待 cur_stream 中的所有操作完成
                         ### 判断加载是否正确
                         predict_experts = current_buffer.get_predict_experts()
                         

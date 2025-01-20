@@ -112,7 +112,7 @@ def set_skip_layer_idx(layer_idx):
     print(skip_layer_idx)
 
 up_th = None
-def load_thresholds(threshold_path, use_average=True, zero = False):
+def load_thresholds(threshold_path, use_average=True, zero = False, use_type="gate"):
     """
     load thresholds from path
     """
@@ -122,10 +122,7 @@ def load_thresholds(threshold_path, use_average=True, zero = False):
         up_th = [[0] * 8] * 32
         # print(up_th)
         return
-    if use_average:
-        up_th = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds_2"]
-    else:
-        up_th = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds"]
+    up_th = torch.load(threshold_path, map_location='cuda')[f"{use_type}_proj_states_thresholds"]
     print(f"Thresholds loaded from {threshold_path}")
     # return thresholds
 
@@ -767,6 +764,11 @@ class MixtralBLockSparseTop2MLP(nn.Module):
         super().__init__()
         self.ffn_dim = config.intermediate_size
         self.hidden_dim = config.hidden_size
+        try:
+            self.sparsity_selection = config.sparsity_selection
+        except:
+            print("using default gate...")
+            self.sparsity_selection = "gate"
         self.layer_idx = layer_idx
         self.expert_idx = expert_idx
 
@@ -774,7 +776,7 @@ class MixtralBLockSparseTop2MLP(nn.Module):
         self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)
         self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
         # if not profile_threshold:
-        self.up_threshold = torch.tensor(up_th[self.layer_idx][self.expert_idx])
+        self.threshold = torch.tensor(up_th[self.layer_idx][self.expert_idx])
 
         self.count_sum = 0
         self.token_sum = 0
@@ -806,52 +808,76 @@ class MixtralBLockSparseTop2MLP(nn.Module):
         # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
         activation = self.act_fn(self.w1(hidden_states)) 
         up_result = self.w3(hidden_states)
-        if preatt_score != None:
-            up_pre_result = self.w3(preatt_score)
-            v = torch.abs(up_pre_result)
 
-        global th
-        if profile_mode:
-            ## 统计分布
-            global x_all
-            global x_small
-            
-            if profile_x_pos:
-                global x_pos
-                mask = (v >= th[self.layer_idx][self.expert_idx]).to(hidden_states.dtype)
-                nonzero_counts = torch.sum(mask != 0, dim=tuple(range(mask.dim() - 1))).cpu()
-                # print(nonzero_counts.shape) # 14336
-                x_pos[self.layer_idx][self.expert_idx] += nonzero_counts
-            
-            if(self.layer_idx is not None and self.expert_idx is not None):
-                x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
-                for i in range(step):
-                    x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (1.0/step)*(i+1) ).item()
-            current_hidden_states = activation * self.w3(hidden_states)
+        if self.sparsity_selection == "gate":
+            activation = torch.where(torch.abs(activation) > self.threshold.to(hidden_states.device),
+                activation, 0.0, )
+            true_ratio = (activation != 0).sum().item()
+            current_hidden_states = up_result * activation
+        elif self.sparsity_selection == "up":
+            up_result = torch.where(torch.abs(up_result) > self.threshold.to(hidden_states.device),
+                up_result, 0.0, )
+            true_ratio = (up_result != 0).sum().item()
+            current_hidden_states = up_result * activation
         else:
-            if self.layer_idx != 0:
-                # _, indices1 = torch.topk(v, self.activenum, dim=1)
-                # indices1 = indices1[0]
-                # mask = (v.to(hidden_states.device) >= self.up_threshold.to(hidden_states.device)).to(hidden_states.dtype)
-                if self.layer_idx >= 15:
-                    up_proj_states = torch.where(v > self.up_threshold.to(hidden_states.device),
-                         up_pre_result, 0.0, )
-                else:
-                    up_proj_states = torch.where(v > self.up_threshold.to(hidden_states.device),
-                         up_result, 0.0, )
-                ### Calculate actual preserved ratio
-                true_ratio = (up_proj_states != 0).sum().item()
-                self.count_sum += true_ratio
-                self.token_sum += up_proj_states.numel()
-            # #### 动态预测数据采集
-            # if profile_sparsity and self.layer_idx == skip_layer_idx:
-            #     dataset_x[self.expert_idx].append(preatt_score)
-            #     dataset_y[self.expert_idx].append(v)
-                current_hidden_states = up_proj_states * activation
-            else:
-                current_hidden_states = up_result * activation
+            current_hidden_states = up_result * activation
+            current_hidden_states = torch.where(torch.abs(current_hidden_states) > self.threshold.to(hidden_states.device),
+                current_hidden_states, 0.0, )
+            true_ratio = (current_hidden_states != 0).sum().item()
+        self.count_sum += true_ratio
+        self.token_sum += current_hidden_states.numel()
+
         current_hidden_states = self.w2(current_hidden_states)
         return routing_weights * current_hidden_states
+
+    # def forward(self, hidden_states, routing_weights, preatt_score=None):
+    #     # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
+    #     activation = self.act_fn(self.w1(hidden_states)) 
+    #     up_result = self.w3(hidden_states)
+    #     # if preatt_score != None:
+    #     #     up_pre_result = self.w3(preatt_score)
+    #     #     v = torch.abs(up_pre_result)
+
+    #     global th
+    #     if profile_mode:
+    #         ## 统计分布
+    #         global x_all
+    #         global x_small
+            
+    #         if profile_x_pos:
+    #             global x_pos
+    #             mask = (v >= th[self.layer_idx][self.expert_idx]).to(hidden_states.dtype)
+    #             nonzero_counts = torch.sum(mask != 0, dim=tuple(range(mask.dim() - 1))).cpu()
+    #             # print(nonzero_counts.shape) # 14336
+    #             x_pos[self.layer_idx][self.expert_idx] += nonzero_counts
+            
+    #         if(self.layer_idx is not None and self.expert_idx is not None):
+    #             x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
+    #             for i in range(step):
+    #                 x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (1.0/step)*(i+1) ).item()
+    #         current_hidden_states = activation * self.w3(hidden_states)
+    #     else:
+    #         # if self.layer_idx != 0:
+    #             # _, indices1 = torch.topk(v, self.activenum, dim=1)
+    #             # indices1 = indices1[0]
+    #             # mask = (v.to(hidden_states.device) >= self.up_threshold.to(hidden_states.device)).to(hidden_states.dtype)
+    #             # if self.layer_idx >= 15:
+    #             #     up_proj_states = torch.where(v > self.up_threshold.to(hidden_states.device),
+    #             #          up_pre_result, 0.0, )
+    #             # else:
+    #             up_proj_states = torch.where(v > self.up_threshold.to(hidden_states.device),
+    #                     up_result, 0.0, )
+    #             ### Calculate actual preserved ratio
+    #             
+    #         # #### 动态预测数据采集
+    #         # if profile_sparsity and self.layer_idx == skip_layer_idx:
+    #         #     dataset_x[self.expert_idx].append(preatt_score)
+    #         #     dataset_y[self.expert_idx].append(v)
+    #             current_hidden_states = up_proj_states * activation
+    #         # else:
+    #         #     current_hidden_states = up_result * activation
+    #     current_hidden_states = self.w2(current_hidden_states)
+    #     return routing_weights * current_hidden_states
 
 
 MISTRAL_ATTENTION_CLASSES = {

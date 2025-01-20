@@ -772,26 +772,15 @@ class MixtralBLockSparseTop2MLP(nn.Module):
         ### 保存稀疏后的阈值
 
         activation = self.act_fn(self.w1(hidden_states)) 
+        self.gate_proj_states = activation.detach().cpu()
         up_result = self.w3(hidden_states)
-        predction = activation * up_result
-
-        ### 只保留前topk个神经元
-        topk_indices = torch.topk(predction, self.sc_nums).indices
-
-        # print(topk_indices.shape)torch.Size([538, 2867])
-        # print(activation.shape) # torch.Size([538, 14336])
-        activation_cp = torch.zeros_like(activation)
-        up_result_cp = torch.zeros_like(up_result)
-        ### 根据topk_indices将activation和up_result中的对应位置的值保留
-        for i in range(activation.shape[0]):
-            activation_cp[i][topk_indices[i]] = activation[i][topk_indices[i]]
-            up_result_cp[i][topk_indices[i]] = up_result[i][topk_indices[i]]
-
-        self.gate_proj_states = activation_cp.detach().cpu()
-        self.up_proj_states = up_result_cp.detach().cpu()
+        self.up_proj_states = up_result.detach().cpu()
+        
         current_hidden_states = activation*up_result
-
+        self.down_proj_states = current_hidden_states.detach().cpu()
+        
         current_hidden_states = self.w2(current_hidden_states)
+        
         return routing_weights * current_hidden_states
 
 
