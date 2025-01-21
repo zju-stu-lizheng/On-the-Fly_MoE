@@ -196,13 +196,13 @@ class PipelineLLM:
                     experts = layer.block_sparse_moe.experts
 
                     # 将experts移动到GPU
-                    if layer_idx != 0:
+                    if layer_idx >= self.offload_startid:
                         for expert in experts:
                             expert.cuda(int(self.device[-1]))
                     # 在GPU上进行MoE计算（gate保持在CPU）
                     final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
                     # 计算完成后将experts移回CPU
-                    if layer_idx != 0:
+                    if layer_idx >= self.offload_startid:
                         cur_device = self.device_map[layer_idx]
                         for expert in experts:
                             expert.w1.to(cur_device)

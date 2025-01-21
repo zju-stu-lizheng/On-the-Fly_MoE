@@ -598,6 +598,14 @@ class MixtralBlockSparseTop2MLP(nn.Module):
         self.threshold=torch.tensor(0.0)
         self.w2t=None
 
+    def old_forward(self, hidden_states):
+        current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
+        if self.w2t != None:
+            current_hidden_states = torch.matmul(current_hidden_states, self.w2t)
+        else:
+            current_hidden_states = self.w2(current_hidden_states)
+        return current_hidden_states
+
     def kernel_forward(self, hidden_states):
         import kernels
         hidden_states = hidden_states.reshape(1, -1 , self.hidden_dim)

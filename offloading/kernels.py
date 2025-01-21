@@ -19,22 +19,12 @@ def init_to_zero(name):
     configs=[
         triton.Config({"BLOCK_M": 4, "BLOCK_N": 256}, num_warps=4),
         triton.Config({"BLOCK_M": 4, "BLOCK_N": 512}, num_warps=4),
-        triton.Config({"BLOCK_M": 4, "BLOCK_N": 1024}, num_warps=4),
         triton.Config({"BLOCK_M": 8, "BLOCK_N": 256}, num_warps=4),
         triton.Config({"BLOCK_M": 8, "BLOCK_N": 512}, num_warps=4),
-        triton.Config({"BLOCK_M": 8, "BLOCK_N": 1024}, num_warps=4),
         triton.Config({"BLOCK_M": 16, "BLOCK_N": 256}, num_warps=4),
         triton.Config({"BLOCK_M": 16, "BLOCK_N": 512}, num_warps=4),
-        triton.Config({"BLOCK_M": 16, "BLOCK_N": 1024}, num_warps=4),
         triton.Config({"BLOCK_M": 32, "BLOCK_N": 256}, num_warps=4),
-        triton.Config({"BLOCK_M": 32, "BLOCK_N": 512}, num_warps=4),
-        triton.Config({"BLOCK_M": 32, "BLOCK_N": 1024}, num_warps=4),
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 256}, num_warps=4),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 512}, num_warps=4),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 1024}, num_warps=4),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256}, num_warps=4),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 512}, num_warps=4),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 1024}, num_warps=4),
     ],
     key=["CACHE_KEY_M", "CACHE_KEY_N", "BATCHSIZE"],
 )
@@ -165,34 +155,16 @@ def gather_gemv_elemul_flag_3d(
             {"BLOCK_M": 16, "BLOCK_N": 512}, num_warps=4, pre_hook=init_to_zero("Y")
         ),
         triton.Config(
-            {"BLOCK_M": 16, "BLOCK_N": 1024}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
-            {"BLOCK_M": 16, "BLOCK_N": 2048}, num_warps=8, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
             {"BLOCK_M": 32, "BLOCK_N": 256}, num_warps=4, pre_hook=init_to_zero("Y")
         ),
         triton.Config(
             {"BLOCK_M": 32, "BLOCK_N": 512}, num_warps=4, pre_hook=init_to_zero("Y")
         ),
         triton.Config(
-            {"BLOCK_M": 32, "BLOCK_N": 1024}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
-            {"BLOCK_M": 32, "BLOCK_N": 2048}, num_warps=8, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
             {"BLOCK_M": 64, "BLOCK_N": 256}, num_warps=4, pre_hook=init_to_zero("Y")
         ),
         triton.Config(
             {"BLOCK_M": 64, "BLOCK_N": 512}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 1024}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 2048}, num_warps=8, pre_hook=init_to_zero("Y")
         ),
         triton.Config(
             {"BLOCK_M": 128, "BLOCK_N": 16}, num_warps=4, pre_hook=init_to_zero("Y")
@@ -204,18 +176,6 @@ def gather_gemv_elemul_flag_3d(
             {"BLOCK_M": 128, "BLOCK_N": 64}, num_warps=4, pre_hook=init_to_zero("Y")
         ),
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 256}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 512}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 1024}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
             {"BLOCK_M": 128, "BLOCK_N": 16}, num_warps=4, pre_hook=init_to_zero("Y")
         ),
         triton.Config(
@@ -224,20 +184,6 @@ def gather_gemv_elemul_flag_3d(
         triton.Config(
             {"BLOCK_M": 256, "BLOCK_N": 64}, num_warps=4, pre_hook=init_to_zero("Y")
         ),
-        triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 256}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 512}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-        triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 1024}, num_warps=4, pre_hook=init_to_zero("Y")
-        ),
-
-
     ],
     key=["CACHE_KEY_M", "CACHE_KEY_N", "BATCHSIZE"],
 )

@@ -199,7 +199,12 @@ def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9, backends='bitblas',
             llm.model.layers[i].block_sparse_moe.experts[j].w2t = llm.model.layers[i].block_sparse_moe.experts[j].w2.weight.T.contiguous().cuda(device_number)
             llm.model.layers[i].block_sparse_moe.experts[j].w1.cuda(device_number)
             llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(device_number)
-            llm.model.layers[i].block_sparse_moe.experts[j].forward = llm.model.layers[i].block_sparse_moe.experts[j].kernel_forward
+            # llm.model.layers[i].block_sparse_moe.experts[j].forward = llm.model.layers[i].block_sparse_moe.experts[j].kernel_forward
+            llm.model.layers[i].block_sparse_moe.experts[j].forward = llm.model.layers[i].block_sparse_moe.experts[j].old_forward
+
+    for i in range(prefill_layers, 32):
+        for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
+            llm.model.layers[i].block_sparse_moe.experts[j].forward = llm.model.layers[i].block_sparse_moe.experts[j].old_forward
 
     llm.model.norm.cuda(device_number)
     llm.lm_head.cuda(device_number)
