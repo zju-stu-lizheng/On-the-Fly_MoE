@@ -5,6 +5,9 @@
 4. MoE-Lightning: High-Throughput MoE Inference on Memory-constrained GPUs  (offline & batch workloads)
 5. MC-MoE: Mixture Compressor for Mixture-of-Experts LLMs Gains More
 
+<!-- 设置新分支 git push --set-upstream origin simulate -->
+<!-- git push origin simulate就可以了  -->
+
 ### 实验思路
 两种预测方式进行结合（取并集）：
 - 保留prefill阶段的一部分固定神经元的位置
@@ -15,3 +18,4 @@
 * convert_llama.py： 用于MLP层（专家）的稀疏预测器结构
 * saving/: 定制化生成 输入x和激活值 的【数据集】
 * quantize/: + 量化的实验部分
+* offloading/: 专家卸载与pipeline的框架
