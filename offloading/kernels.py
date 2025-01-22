@@ -113,7 +113,7 @@ def gather_gemv_elemul_flag_3d(
     :return: result tensor, (batch, N)
     """
     Z, N = wup.shape
-    beam_width, seq_len, _ = x.shape
+    tokens, _ = x.shape
     # assert x.shape == (batch, N)
     # assert x_1.shape == (batch, Z)
     # assert seq_len == 1
@@ -126,7 +126,7 @@ def gather_gemv_elemul_flag_3d(
     #     x.dtype == wup.dtype
     # ), f"Input and weight must have the same dtype, got {x.dtype} and {wup.dtype}"
     # output1 = torch.empty(beam_width, seq_len, Z, device=x.device, dtype=torch.float16)
-    output = torch.empty(beam_width, seq_len, Z, device=x.device, dtype=torch.float16)
+    output = torch.empty(tokens, Z, device=x.device, dtype=torch.float32)
 
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (triton.cdiv(Z, META["BLOCK_M"]),)  # noqa
@@ -142,7 +142,7 @@ def gather_gemv_elemul_flag_3d(
         Z // 512,  # key for triton cache (limit number of compilations)
         N // 1024,  # key for triton cache (limit number of compilations)
         wup.stride(0),  # strides
-        beam_width,  # Can't use kwargs because auto-tuner requires args
+        tokens,  # Can't use kwargs because auto-tuner requires args
     )
     return output.to(x.dtype)
 
@@ -260,15 +260,14 @@ def gather_transposed_gemv_flag_3d(
     :return: result tensor
     """
     Z, N = weight.shape
-    beam_width, seq_len, _ = x.shape
-    assert x.shape[2] == Z
+    tokens, _ = x.shape
+    assert x.shape[1] == Z
     x = x.contiguous()
     # if weight.stride(1) > 1:
     #     weight = weight.contiguous()
 
     output = torch.empty(
-        beam_width,
-        seq_len,
+        tokens,
         N,
         device=x.device,
         dtype=torch.float16,
@@ -290,7 +289,7 @@ def gather_transposed_gemv_flag_3d(
         Z // 128,  # key for triton cache (limit number of compilations)
         N // 32,
         weight.stride(0),  # strides
-        beam_width,  # can't use kwargs because auto-tuner requires args
+        tokens,  # can't use kwargs because auto-tuner requires args
     )
     # return output
     return output.to(dtype=weight.dtype)
@@ -305,10 +304,10 @@ def gather_gemv_elemul_flag_3d_fake_impl(x, x_1, wup, idx):
     # 根据源码注释：
     # wup.shape == (Z, N)
     # x.shape == (beam_width, seq_len, ?)，最后一维通常是 Z
-    beam_width, seq_len, _ = x.shape
+    tokens, _ = x.shape
     Z, N = wup.shape
     # 从您的注释中可知，最终 output.shape == (beam_width, seq_len, Z)
-    out_shape = (beam_width, seq_len, Z)
+    out_shape = (tokens, Z)
     # 假设输出dtype与 x.dtype 一致
     # 注意：原代码中是 return output.to(x.dtype)
     # 这里可以选 x.dtype / wup.dtype 均可，看最终实现
@@ -325,12 +324,13 @@ def gather_transposed_gemv_fla_fake_impl(x, weight, idx):
     """
     # weight.shape == (Z, N)
     # x.shape == (beam_width, seq_len, Z)
-    beam_width, seq_len, Z = x.shape
+    tokens, Z = x.shape
     # 最终 output.shape == (beam_width, seq_len, N)
     N = weight.shape[1]
-    out_shape = (beam_width, seq_len, N)
+    out_shape = (tokens, N)
     out_dtype = x.dtype  # 也可改为 weight.dtype, 取决于真实实现
     return x.new_empty(out_shape, dtype=out_dtype)
+
 def gather_gemv_elemul_flag_3d_fake_autograd( x,grad,):
    
     return ( None,None,None,None,None,)

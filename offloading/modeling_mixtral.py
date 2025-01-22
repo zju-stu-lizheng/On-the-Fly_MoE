@@ -593,6 +593,7 @@ class MixtralBlockSparseTop2MLP(nn.Module):
         self.w1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
         self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)
         self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
+        self.graph = None
 
         self.act_fn = ACT2FN[config.hidden_act]
         self.threshold=torch.tensor(0.0)
@@ -608,29 +609,32 @@ class MixtralBlockSparseTop2MLP(nn.Module):
 
     def kernel_forward(self, hidden_states):
         import kernels
-        hidden_states = hidden_states.reshape(1, -1 , self.hidden_dim)
+        # hidden_states = hidden_states.reshape(1, -1 , self.hidden_dim)
         # print(hidden_states.shape)
-        if hidden_states.shape[1]!=1:
+        if hidden_states.shape[0] != 1:
             down_proj = torch.matmul(self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states), self.w2t)
-            return down_proj.reshape(-1 , self.hidden_dim)
+            return down_proj
         else:
-            # print(hidden_states.shape)
-            #### up正常用 gemlite的实现
-            x_1 = self.w3(hidden_states)
-            flags = torch.abs(x_1) > self.threshold
-            # print(x_1,flags,self.threshold)
-            hidden_states = kernels.gather_gemv_elemul_flag_3d(
-                    hidden_states, 
-                    x_1, 
-                    self.w1.weight.data, 
-                    flags
-            )
-            down_proj = kernels.gather_transposed_gemv_flag_3d(
-                    hidden_states, 
-                    self.w2t, ### 转置的w2 的 weight.data
-                    flags
+            if self.graph:
+                return self.graph(hidden_states)
+            else:
+                # print(hidden_states.shape)
+                #### up正常用 gemlite的实现
+                x_1 = self.w3(hidden_states)
+                flags = torch.abs(x_1) > self.threshold
+                # print(x_1,flags,self.threshold)
+                hidden_states = kernels.gather_gemv_elemul_flag_3d(
+                        hidden_states, 
+                        x_1, 
+                        self.w1.weight.data, 
+                        flags
                 )
-            return down_proj.reshape(-1 , self.hidden_dim)
+                down_proj = kernels.gather_transposed_gemv_flag_3d(
+                        hidden_states, 
+                        self.w2t, ### 转置的w2 的 weight.data
+                        flags
+                    )
+                return down_proj
     
     def forward(self, hidden_states):
         current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
