@@ -53,15 +53,12 @@ class PipelineLLM:
         self.stream_conflict = torch.cuda.Stream(device=device)
 
         self.top_k = 2
+        self.num_experts = 8 ### 一层的专家个数
         self.activation = nn.SiLU()
 
         # 用于统计时间的变量 和 重新加载专家的个数
         self.total_reload_experts = 0
         self.prefill_time = 0
-
-        #### 用于模拟: 保证routing gate保存在对应的device上
-        for i in range(self.offload_startid, 32):
-            self.llm.model.layers[i].block_sparse_moe.gate.cuda(self.device)
 
         #### 增加[1,3]的Expert_Predictor
         self.eps = []
@@ -219,6 +216,63 @@ class PipelineLLM:
         self.w2_expert1 = self.llm.model.layers[layer_idx].block_sparse_moe.experts[expert_ids[1]].w2.weight.T
         self.w3_expert1 = self.llm.model.layers[layer_idx].block_sparse_moe.experts[expert_ids[1]].w3
 
+    def load_prefill_layer_2(self, layer_idx=0, expert_idx=None):
+        """
+        只复制指针，不进行实际的数据搬运
+        
+        参数:
+            cpu_mlp: 包含CPU上参数的字典（第一个专家）
+            cpu_mlp_expert1: 包含CPU上参数的字典（第二个专家）。
+        """
+        self.w1_expert0 = self.llm.model.layers[layer_idx].block_sparse_moe.experts[expert_idx].w1.weight
+        self.w2_expert0 = self.llm.model.layers[layer_idx].block_sparse_moe.experts[expert_idx].w2.weight.T
+        self.w3_expert0 = self.llm.model.layers[layer_idx].block_sparse_moe.experts[expert_idx].w3
+
+    def parallel_computation_2(self, hidden_states, layer_idx):
+        """
+        并行计算函数，支持跨设备计算和异步传输，并对两个专家分别计算。
+
+        参数:
+            self: 包含模型参数和设备的对象。
+            hidden_states (torch.Tensor): 输入张量，位于 device1 上。
+            layer_idx (int): 当前层的索引，用于确定 device2。
+
+        返回:
+            tuple: 包含两个专家的计算结果，均位于 device1 上。
+        """
+        # 获取设备
+        device1 = self.device
+        device2 = self.device_map[layer_idx]
+
+        # 第1步：将 x 从 device1 传输到 device2（异步）
+        with torch.cuda.stream(self.stream0):
+            x_device2 = hidden_states.to(device2, non_blocking=True)  # 异步传输
+
+        # 第2步：在 device1 上计算 expert0 和 expert1 的 up(x)
+        with torch.cuda.stream(self.stream0):
+            up_x_expert0 = self.w3_expert0(hidden_states)  # expert0 的计算
+
+        # 第3步：在 device2 上计算 expert0 和 expert1 的 gate(x_device2)
+        gate_x_expert0 = self.activation(torch.matmul(x_device2, self.w1_expert0.T))
+
+        # 第4步：将 up_x_expert0 和 up_x_expert1 从 device1 传输到 device2（异步）
+        with torch.cuda.stream(self.stream0):
+            up_x_device2_expert0 = up_x_expert0.to(device2, non_blocking=True)  # expert0 的传输
+
+        # 第5步：在 device2 上计算 expert0 和 expert1 的 down(gate_x * up_x_device2)
+        down_x_device2_expert0 = torch.matmul(gate_x_expert0 * up_x_device2_expert0, self.w2_expert0)
+
+        # 第6步：将 down_x_expert0 和 down_x_expert1 从 device2 传输回 device1（异步）
+        with torch.cuda.stream(self.stream0):
+            down_x_device1_expert0 = down_x_device2_expert0.to(device1, non_blocking=True)  # expert0 的传输
+
+        # 同步 Stream，确保所有操作完成
+        torch.cuda.synchronize(device1)
+        torch.cuda.synchronize(device2)
+
+        # 返回两个专家的计算结果
+        return down_x_device1_expert0
+
     def _replace_forward_methods(self):
         """
         替换模型每一层的 forward 方法，添加参数预加载逻辑和注意力计算。
@@ -266,10 +320,7 @@ class PipelineLLM:
                     if layer_idx < self.offload_startid:
                         final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
                     else:
-                        cur_device = self.device_map[layer_idx]
-
                         ### 模拟，这里把hidden_states传到experts在的地方
-                        # hidden_states = hidden_states.to(cur_device)
                         time.sleep(self.one_layer_compensate)  
 
                         # 在GPU上进行MoE计算
@@ -280,24 +331,50 @@ class PipelineLLM:
 
                         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
                         _, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-                        # Initialize output tensor
-                        final_hidden_states = torch.zeros_like(hidden_states)
-                        # 计算完成后将experts移回CPU
-                        for i in range(batch_size * sequence_length):
-                            # Get current token's hidden state
-                            current_state = hidden_states[i]
-                            
-                            # Get selected experts and their weights for this token
-                            current_weights = routing_weights[i]
-                            current_experts = selected_experts[i]
-                            
-                            self.load_prefill_layer(layer_idx, current_experts)
-                            down_x_device1_expert0, down_x_device1_expert1 = self.parallel_computation(hidden_states=current_state.unsqueeze(0), layer_idx=layer_idx)
 
-                            expert_output = down_x_device1_expert0.squeeze(0) * current_weights[0] + down_x_device1_expert1.squeeze(0) * current_weights[1]
+                        final_hidden_states = torch.zeros(
+                            (batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+                        )
+
+                        # One hot encode the selected experts to create an expert mask
+                        # this will be used to easily index which expert is going to be sollicitated
+                        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+
+                        # Loop over all available experts in the model and perform the computation on each expert
+                        for expert_idx in range(self.num_experts):
+                            # expert_layer = self.experts[expert_idx]
+                            idx, top_x = torch.where(expert_mask[expert_idx])
+
+                            # Index the correct hidden states and compute the expert hidden state for
+                            # the current expert. We need to make sure to multiply the output hidden
+                            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+                            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
                             
-                            # Store result in final output tensor
-                            final_hidden_states[i] = expert_output
+                            # current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+                            self.load_prefill_layer_2(layer_idx, expert_idx)
+                            current_hidden_states = self.parallel_computation_2(hidden_states=current_state, layer_idx=layer_idx) * routing_weights[top_x, idx, None]
+
+                            # However `index_add_` only support torch tensors for indexing so we'll use
+                            # the `top_x` tensor here.
+                            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+                        # # Initialize output tensor
+                        # final_hidden_states = torch.zeros_like(hidden_states)
+                        # # 计算完成后将experts移回CPU
+                        # for i in range(batch_size * sequence_length):
+                        #     # Get current token's hidden state
+                        #     current_state = hidden_states[i]
+                            
+                        #     # Get selected experts and their weights for this token
+                        #     current_weights = routing_weights[i]
+                        #     current_experts = selected_experts[i]
+                            
+                        #     self.load_prefill_layer(layer_idx, current_experts)
+                        #     down_x_device1_expert0, down_x_device1_expert1 = self.parallel_computation(hidden_states=current_state.unsqueeze(0), layer_idx=layer_idx)
+
+                        #     expert_output = down_x_device1_expert0.squeeze(0) * current_weights[0] + down_x_device1_expert1.squeeze(0) * current_weights[1]
+                            
+                        #     # Store result in final output tensor
+                        #     final_hidden_states[i] = expert_output
                         
                         final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
 

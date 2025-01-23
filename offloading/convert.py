@@ -177,8 +177,6 @@ def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9, backends='bitblas',
         ### 原始的gate
         llm.model.layers[i].block_sparse_moe.gate.cuda(device_number)
         for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
-            # if backends == 'gemlite':
-            #     llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(device_number)
             if backends == "bitblas":
                 llm.model.layers[i].block_sparse_moe.experts[j].w3.W_q = \
                     llm.model.layers[i].block_sparse_moe.experts[j].w3.W_q.cuda(device_number)
