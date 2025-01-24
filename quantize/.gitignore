@@ -4,3 +4,4 @@ run_2.sh
 *.sh
 *.out
 device_map_1.json
+device_map_2.json
