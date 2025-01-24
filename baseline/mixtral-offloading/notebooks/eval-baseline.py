@@ -1,6 +1,6 @@
 # fix numpy in colab
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
-from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM, MixtralForCausalLM
 import torch
 import numpy
 import os
@@ -8,23 +8,68 @@ import sys
 import argparse
 import logging
 
-sys.path.append("/data2/lz/On-the-Fly_MoE_Inference/baseline/mixtral-offloading")
+sys.path.append("../../mixtral-offloading")
 
+def get_model(model_name, device_map, dtype=torch.bfloat16, use_cache=True):
+    llm = MixtralForCausalLM.from_pretrained(
+        model_name,
+        device_map=device_map,
+        use_cache=use_cache,
+        torch_dtype=dtype,
+    ) 
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    return llm, tokenizer
+
+def init_mixtral_gpu(args):
+    from hqq.core.quantize import BaseQuantizeConfig
+    from hqq.models.hf.mixtral import MixtralHQQ
+    ### HQQ量化
+    from hqq.core.quantize import HQQLinear, HQQBackend
+    from hqq.utils.patching import prepare_for_inference
+
+    # # #Optimize
+    backend = 'bitblas'
+    HQQLinear.set_backend(HQQBackend.PYTORCH)
+
+    model_name = "/data/Mixtral-8x7B"
+    dtype = torch.float16
+    device = torch.device("cuda:0")
+
+    print("starting build model")
+    llm, tokenizer = get_model(model_name, 'cpu', dtype=dtype)
+
+    q3_config    = BaseQuantizeConfig(nbits=2, group_size=64)
+
+    quant_config = {
+        'block_sparse_moe.experts.w1'  :q3_config,
+        'block_sparse_moe.experts.w2'  :q3_config,
+	'block_sparse_moe.experts.w3'  :q3_config,
+	}
+    MixtralHQQ.quantize_model(llm, quant_config=quant_config)  
+    prepare_for_inference(llm, backend=backend, verbose=True)
+
+    return llm
 
 def main(args):
-    os.chdir("/data2/lz/On-the-Fly_MoE_Inference/baseline/mixtral-offloading")
+    os.chdir("../../mixtral-offloading")
 
     if args.framework == 'mixtral-offloading':
         logging.info('Using mixtral-offloading')
         model = init_mixtral_offload(args)
         print("prepare done ...")
+    elif args.framework == 'mixtral-gpu':
+        logging.info('Using mixtral-gpu')
+        model = init_mixtral_gpu(args)
     elif args.framework == 'deepspeed-mii':
         logging.info('Using deepspeed-mii')
         model = init_deepspeed_mii()
     else:
         raise ValueError(f'Unknown framework: {args.framework}')
 
-    eval(model, model_name = "/data2/lz/Mixtral-8x7B")
+    eval(model, model_name = "/data/Mixtral-8x7B")
 
 
 def init_deepspeed_mii():
@@ -131,7 +176,7 @@ def eval(model, model_name):
 
     device = torch.device("cuda:0")
 
-    path_json = '/data2/lz/fiddler-main/benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json'
+    path_json = '/data/fiddler-main/benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json'
     with open(path_json, 'r') as f:
         data = json.load(f)
     texts = []
@@ -181,14 +226,16 @@ def eval(model, model_name):
                 end_time = time.time()
                 time_sum += end_time - start_time
                 # count the number of tokens in the output
-                num_tokens += result["sequences"].shape[1]
+                num_tokens += (result["sequences"].shape[1] - input_token)
+                print("output_tokens: ",result["sequences"].shape[1] - input_token)
                 # print(f'output text: {tokenizer.decode(result["sequences"][0])}')
 
+            ### 应该按实际的num_tokens来算
             logging.info(
                 f'*******************\n'
                 f'input_token: {input_token}, output_token: {output_token}, '
                 f'time: {time_sum / n_sample:.2f}, '
-                f'token/s: {output_token / (time_sum / n_sample):.2f}\n'
+                f'token/s: {num_tokens / (time_sum):.3f}\n'
                 f'*******************\n')
 
 
@@ -203,6 +250,7 @@ if __name__ == "__main__":
         type=str,
         default='mixtral-offloading',
         choices=[
+            'mixtral-gpu',
             'mixtral-offloading',
             'deepspeed-mii'],
         help='Which framework to use for evaluation.')
@@ -210,5 +258,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # save log to file
-    logging.basicConfig(filename='eval.log', level=logging.INFO)
+    logging.basicConfig(filename=f'eval{args.framework}.log', level=logging.INFO)
     main(args)
