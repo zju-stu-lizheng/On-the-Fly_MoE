@@ -3,4 +3,5 @@ unuse/
 *.txt
 *.pt
 *.out
+*.log
 *.json
