@@ -220,11 +220,11 @@ for input_length in input_length_range:
                 end_event.record()
                 torch.cuda.synchronize()
 
+                elapsed_time = start_event.elapsed_time(end_event) / 1000  # 转换为秒
+                cur_prefill_time = PLLM.get_prefill_time()
                 if (len(output[0]) - input_length) == output_length:
                     # 计算时间
-                    elapsed_time = start_event.elapsed_time(end_event) / 1000  # 转换为秒
                     decode_time += elapsed_time
-                    cur_prefill_time = PLLM.get_prefill_time()
                     prefill_time += cur_prefill_time
                     generated_all += (len(output[0]) - input_length)
                     reloaded_experts += PLLM.get_reload_experts()
