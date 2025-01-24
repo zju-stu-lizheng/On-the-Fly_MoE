@@ -8,7 +8,7 @@ from torch.cuda.amp import GradScaler, autocast # 用于混合精度训练
 from torch.utils.data import DataLoader, Dataset, random_split
 from torch.utils.tensorboard import SummaryWriter
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 
 def top_k_position_accuracy_unordered(output, target, k=1):
 	"""Compute the accuracy based on the intersection of top-k values between output and target,
@@ -175,12 +175,24 @@ class SimpleLinearModel(nn.Module):
 		x= self.activation(x)
 		return self.linear2(x)
 
+class RouterModel(nn.Module):
+    def __init__(self, input_dim, output_dim, layer_id):
+        super(RouterModel, self).__init__()
+        self.linear1 = nn.Linear(input_dim, output_dim)
+        loaded_weights = torch.load(f"./router/{layer_id}.pt")
+        with torch.no_grad():  # 禁用梯度计算
+            self.linear1.weight.copy_(loaded_weights)
+
+    def forward(self, x):
+        return self.linear1(x)
 
 def train_ep(args):
-	for i in [6,7,8,9,31]:
+	print(args.need_to_process)
+	for i in args.need_to_process:
 	# for i in range(1, 4):
 		print("layer ", i)
-		file_names = [f'merge/a2ef_{i}_{j}.pth' for j in range(10)]
+		file_names = [f'merge/a2ef_{i}.pth']
+		# file_names = [f'merge/a2ef_{i}_{j}.pth' for j in range(10)]
 		dataset = CustomDataset(file_paths=file_names)
 		# 划分训练集和验证集
 		train_size = int(0.8 * len(dataset))
@@ -190,7 +202,9 @@ def train_ep(args):
 		print(len(train_dataset))
 		val_loader = DataLoader(val_dataset, batch_size=2048, shuffle=False)
 
-		model=SimpleLinearModel(4096,8, hidden_dim=512)
+		# model=SimpleLinearModel(4096,8, hidden_dim=512)
+		model = RouterModel(4096, 8, i).cuda()
+
 		model.to("cuda")  # 假设使用 GPU
 		eval_model(model, val_loader)
 		# criterion = nn.MSELoss().to("cuda")
@@ -210,4 +224,5 @@ if __name__ == '__main__':
 	parser.add_argument("--epochs", type=int, default=4)
 	args = parser.parse_args()
 	dtype = torch.float16
+	args.need_to_process = [4,5] + list(range(10,31))
 	train_ep(args)

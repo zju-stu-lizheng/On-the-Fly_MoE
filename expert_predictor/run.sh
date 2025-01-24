@@ -1,1 +1,1 @@
-python training.py --epochs 20 > train.out
+CUDA_VISIBLE_DEVICES=3,4 python training.py --epochs 20 > train-2.out
