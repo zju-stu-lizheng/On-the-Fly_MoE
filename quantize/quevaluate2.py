@@ -21,22 +21,28 @@ def doeval(dtype, lora_save_path, args):
 	
 	## 开启稀疏模式
 	set_profile_mode(False)
-	load_thresholds(f'{threshold_path}/thresholds_0_8.pt', use_average=use_average)	
+	load_thresholds(f'{threshold_path}/thresholds_0_8.pt', use_average=use_average, zero=True)	
 	llm, tokenizer = get_model(model_name, device_map, dtype=dtype)
 
-	q4_config    = BaseQuantizeConfig(nbits=8, group_size=64) 
-	q3_config    = BaseQuantizeConfig(nbits=2, group_size=64)
+	# q4_config    = BaseQuantizeConfig(nbits=8, group_size=64) 
+	q3_config    = BaseQuantizeConfig(nbits=4, group_size=64)
 
 	quant_config = {
-	'block_sparse_moe.experts.w3'  :q3_config,
+		'self_attn.q_proj':q3_config,
+		'self_attn.k_proj':q3_config,
+		'self_attn.v_proj':q3_config,
+		'self_attn.o_proj':q3_config,
+		'block_sparse_moe.experts.w1'  :q3_config,
+		'block_sparse_moe.experts.w2'  :q3_config,
+		'block_sparse_moe.experts.w3'  :q3_config,
 	}
 	MixtralHQQ.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)  
 
-	lora_params = get_lora_params(dtype, test=False)
-	print(lora_params)
+	# lora_params = get_lora_params(dtype, test=False)
+	# print(lora_params)
 	# PeftUtils.add_lora(llm, lora_params)
-	PeftUtils.load_lora_weights(llm, lora_save_path)
-	PeftUtils.cast_lora_weights(llm, dtype)
+	# PeftUtils.load_lora_weights(llm, lora_save_path)
+	# PeftUtils.cast_lora_weights(llm, dtype)
 	#### 加载量化后的权重, w3: lora+eora
 	# for i in range(32):
 	# 	if i == 31:
@@ -46,7 +52,7 @@ def doeval(dtype, lora_save_path, args):
 	# 		llm.model.layers[i].block_sparse_moe.experts[j].w3.linear_layer = \
 	# 		CompensatedModel(llm.model.layers[i].block_sparse_moe.experts[j].w3.linear_layer, '/home/lz/On-the-Fly_MoE_Inference/quantize/saved/eora/', layerid=i, expertid=j, device=llmdevice)
 			
-	task_name_list=['winogrande','sciq','openbookqa','arc_challenge','arc_easy']
+	task_name_list=['boolq','sciq','openbookqa', 'winogrande','arc_challenge','arc_easy']
 	num_fewshot = 0
 	myevaluate(task_name_list, llm, tokenizer, num_fewshot, 'cuda')
 
