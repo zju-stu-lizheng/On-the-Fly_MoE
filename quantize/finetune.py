@@ -84,6 +84,44 @@ def get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42):
 
 	return new_train_data, new_test_data
 
+def get_wiki_dataset(tokenizer, sample_num=24000, seed=42):
+	# 加载fineweb数据集
+	test_num = min(sample_num//10, 1000)
+
+	### use bagel
+	wikitext = load_dataset("parquet", data_files="/home/bcds/On-the-Fly_MoE_Inference/wikitext-2/data/train-00000-of-00001.parquet")
+	fineweb = load_dataset("json", data_files="/home/bcds/On-the-Fly_MoE_Inference/bagel-v0.5/processed_data.json")
+	# fineweb = load_dataset("parquet", data_files="/home/bcds/venv/dilab/floe/dataset/finewebedu/sample/10BT/000_00000.parquet")
+	# fineweb = load_dataset("json", data_files="/home/zyx/moe/fineweb-edu/fineweb_edu_sample100000.json")
+
+	dataset_1 = wikitext['train']['text'][:15000] 
+	dataset_2 = fineweb['train']['text'][:15000] 
+	
+	## 随机从fineweb中抽取sample_num条数据
+	combined_text = dataset_1 + dataset_2
+	combined_dataset = Dataset.from_dict({"text": combined_text})
+
+	fineweb_train = combined_dataset.train_test_split(test_size=test_num, seed=seed)
+	train_data = fineweb_train['train'].select(range(sample_num))
+	test_data = fineweb_train['test']
+
+	fineweb_train_data = train_data.map(
+		functools.partial(
+		preprocess_data,
+		tokenizer=tokenizer
+	), batched=True)
+	fineweb_test_data = test_data.map(
+		functools.partial(
+		preprocess_data,
+		tokenizer=tokenizer
+	), batched=True)
+	fineweb_train_data.set_format(type="torch", columns=["input_ids", "labels", "attention_mask"])
+	fineweb_test_data.set_format(type="torch", columns=["input_ids", "labels", "attention_mask"])
+	fineweb_train_data.shuffle(seed)
+	fineweb_test_data.shuffle(seed)
+
+	return fineweb_train_data, fineweb_test_data
+
 
 def get_bagel_dataset(sft_path, fineweb_path, tokenizer, test_num = 0.1, seed = 42, merge=False):
 	bagel = load_dataset("json", data_files=sft_path)
@@ -139,7 +177,8 @@ def dotrain(dtype, args, save_steps = 300):
 	### get peft model for training
 	llm, tokenizer = get_model_for_training(model_name, dtype, device_map, threshold_path, args.sparsity_level, use_average=use_average)
 	# new_train_data, new_test_data = get_combined_dataset(fineweb_path, tokenizer, test_num = 0.1, seed = 42)
-	new_train_data, new_test_data = get_bagel_dataset(bagel_path, fineweb_path, tokenizer, merge=args.merge)
+	# new_train_data, new_test_data = get_bagel_dataset(bagel_path, fineweb_path, tokenizer, merge=args.merge)
+	new_train_data, new_test_data = get_wiki_dataset(tokenizer, sample_num=20000)
 	# model_save_path='./saved/training/less_new'
 	learning_rate = 1e-4
 	micro_batch_size=8

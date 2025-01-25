@@ -56,13 +56,13 @@ def prepare_model(model_name, is_eval=False, has_atten=False, sparsity=80):
 			# attn_implementation="flash_attention_2"
 			)
 		### 加载lora_path：bagel训练的
-		# lora_path_teacher = '/home/bcds/On-the-Fly_MoE_Inference/quantize/saved/training/bagel0/checkpoint-1200'
+		lora_path_teacher = '/home/bcds/On-the-Fly_MoE_Inference/quantize/saved/training/bagel0/checkpoint-1200'
 		#### 加载lora模型并merge
 		
-		# print(f"load lora model: {lora_path_teacher}")
-		# model = PeftModel.from_pretrained(model, lora_path_teacher, adapter_name=f"load_teacher")
-		# model.set_adapter(f"load_teacher")
-		# model = model.merge_and_unload()
+		print(f"load lora model: {lora_path_teacher}")
+		model = PeftModel.from_pretrained(model, lora_path_teacher, adapter_name=f"load_teacher")
+		model.set_adapter(f"load_teacher")
+		model = model.merge_and_unload()
 		model.eval()
 	else:
 		set_profile_mode(mode=False)
@@ -77,7 +77,7 @@ def prepare_model(model_name, is_eval=False, has_atten=False, sparsity=80):
 		print(f"set sparsity to {sparsity}")
 		### 包装lora模块
 		rank = 32
-		target_modules = ["w1","w2"]
+		target_modules = ["w1","w2","w3"]
 		if has_atten:
 			target_modules += ["q_proj","k_proj","v_proj","o_proj",]
 		peft_config = LoraConfig(
@@ -121,6 +121,18 @@ def compute_norm_loss(model, input_ids, attention_mask, labels):
 	norm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
 	return norm_loss
 
+def reverse_kl(logits, teacher_logits, input_ids, attention_mask, labels):
+    student_probs = F.softmax(logits, dim=-1, dtype=torch.float32)
+    student_logprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+    teacher_logprobs = F.log_softmax(teacher_logits, dim=-1, dtype=torch.float32)
+    inf_mask = torch.isinf(teacher_logits) | torch.isinf(logits)
+    prod_probs = torch.masked_fill(student_probs * teacher_logprobs, inf_mask, 0)
+    prod_probs -= torch.masked_fill(student_probs * student_logprobs, inf_mask, 0)
+    x = torch.sum(prod_probs, dim=-1).view(-1)
+    mask = (attention_mask != 0).int()
+    distil_loss = -torch.sum(x * mask.view(-1), dim=0) / torch.sum(mask.view(-1), dim=0)
+    return distil_loss
+
 def forward_kl(logits, teacher_logits, input_ids, attention_mask, labels):
 	teacher_probs = F.softmax(teacher_logits, dim=-1, dtype=torch.float32)
 	inf_mask = torch.isinf(logits)
@@ -154,7 +166,8 @@ def compute_loss(model, teacher_model, input_ids, attention_mask, labels, align_
 
 	# print(last_logits.shape, teacher_outputs.shape)    # torch.Size([6, 512, 32000]) torch.Size([6, 512, 32000])
 	dl_list = []
-	dl = forward_kl(last_logits, teacher_outputs.to(model.device), input_ids, attention_mask, labels).to(last_logits.dtype)
+	dl = forward_kl(last_logits, teacher_outputs.to(model.device), input_ids, attention_mask, labels).to(last_logits.dtype) + \
+		reverse_kl(last_logits, teacher_outputs.to(model.device), input_ids, attention_mask, labels).to(last_logits.dtype)
 	# dl = criterion(last_logits, teacher_outputs.to(model.device))
 	dl_list.append(dl)
 	# for idx in align_list:
@@ -240,6 +253,36 @@ def preprocess_data(batch, tokenizer):
 	inputs["labels"] = inputs.input_ids.clone()
 	return inputs
 
+def get_c4_dataset(tokenizer, sample_num, seed):
+	test_num = min(sample_num//10, 100)
+	with open('../path.json','r') as f:
+		c4_path = json.load(f)["c4"]
+
+	c4 = load_dataset("parquet", data_dir=c4_path)
+	print(f"use c4 datasets, {c4_path}")
+	c4dataset = c4['validation']['text']
+	combined_dataset = Dataset.from_dict({"text": c4dataset})
+
+	fineweb_train = combined_dataset.train_test_split(test_size=test_num, seed=seed)
+	train_data = fineweb_train['train'].select(range(sample_num))
+	test_data = fineweb_train['test']
+
+	fineweb_train_data = train_data.map(
+		functools.partial(
+		preprocess_data,
+		tokenizer=tokenizer
+	), batched=True)
+	fineweb_test_data = test_data.map(
+		functools.partial(
+		preprocess_data,
+		tokenizer=tokenizer
+	), batched=True)
+	fineweb_train_data.set_format(type="torch", columns=["input_ids", "labels", "attention_mask"])
+	fineweb_test_data.set_format(type="torch", columns=["input_ids", "labels", "attention_mask"])
+	fineweb_train_data.shuffle(seed)
+	fineweb_test_data.shuffle(seed)
+	return fineweb_train_data, fineweb_test_data
+
 def get_fineweb_dataset(tokenizer, sample_num=24000, seed=42):
 	# 加载fineweb数据集
 	test_num = min(sample_num//10, 100)
@@ -273,6 +316,8 @@ def get_fineweb_dataset(tokenizer, sample_num=24000, seed=42):
 	), batched=True)
 	fineweb_train_data.set_format(type="torch", columns=["input_ids", "labels", "attention_mask"])
 	fineweb_test_data.set_format(type="torch", columns=["input_ids", "labels", "attention_mask"])
+	fineweb_train_data.shuffle(seed)
+	fineweb_test_data.shuffle(seed)
 
 	return fineweb_train_data, fineweb_test_data
 
@@ -294,7 +339,8 @@ def main():
 	batch_size  = opt.batch_size
 
 	random.seed(42)
-	fineweb_train_data, fineweb_test_data = get_fineweb_dataset(tokenizer, sample_num=sample_num)
+	fineweb_train_data, fineweb_test_data = get_c4_dataset(tokenizer, sample_num=sample_num, seed = 42)
+	# fineweb_train_data, fineweb_test_data = get_fineweb_dataset(tokenizer, sample_num=sample_num)
 	train_loader = DataLoader(fineweb_train_data, batch_size=batch_size, shuffle=True)
 	val_loader = DataLoader(fineweb_test_data, batch_size=batch_size, shuffle=False)
 
@@ -302,7 +348,7 @@ def main():
 	# opt.save_name = f'{sparsity}_{sample_num}_new_{opt.align_list[0]}'
 	opt.save_name = f'{sparsity}_{sample_num}'
 	if opt.has_atten:
-		opt.save_name += '_atten'
+		opt.save_name += '_c4_atten'
 	print(f"Start training {opt.save_name}")
 	train_model(student, teacher, train_loader, val_loader, opt=opt)
 
