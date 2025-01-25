@@ -45,7 +45,7 @@ with open("./device_map_2.json", "r") as f:
 	td = json.load(f)
 
 def prepare_model(model_name, is_eval=False, has_atten=False, sparsity=80):
-	config = MixtralConfig(use_cache=False, output_hidden_states=True)
+	config = MixtralConfig(output_router_logits=True, use_cache=False, output_hidden_states=True)
 	if is_eval:
 		# set_teacher_sparsity(50,'c4')
 		model = MixtralTeacher.from_pretrained(
@@ -86,6 +86,7 @@ def prepare_model(model_name, is_eval=False, has_atten=False, sparsity=80):
 			r=rank,
 			bias="none",
 			target_modules=target_modules,
+			layers_to_transform=[i for i in range(32) if i != 0],
 			task_type="CAUSAL_LM"
 		)
 		#### 加载lora模型并merge
@@ -147,36 +148,48 @@ def forward_kl(logits, teacher_logits, input_ids, attention_mask, labels):
 	distil_loss = -torch.sum(x * mask.view(-1), dim=0) / torch.sum(mask.view(-1), dim=0)
 	return distil_loss
 
+def expert_logits_loss(logits, teacher_logits, attention_mask, criterion=nn.KLDivLoss()):
+	expert_loss = torch.tensor(0.0, device=logits[0].device, dtype=torch.float16)
+	for layerid in range(2, 32):
+		tensor1 = logits[layerid]
+		tensor2 = teacher_logits[layerid]
+
+		mask = attention_mask.unsqueeze(-1).expand_as(tensor1)
+		masked_tensor1 = tensor1 * mask.to(tensor1.device)
+		masked_tensor2 = tensor2 * mask.to(tensor2.device)
+		
+		tensor1 = F.softmax(tensor1, dim=0)
+		tensor2 = F.softmax(tensor2, dim=0)
+		expert_loss += criterion(tensor1.log(), tensor2.to(tensor1.device))
+
+	return expert_loss
+
 def compute_loss(model, teacher_model, input_ids, attention_mask, labels, align_list=[1,32]):
 	"""
 	compute loss for student model
 	"""
-	# criterion = nn.MSELoss(reduction='mean')
-	# criterion = nn.KLDivLoss()
+	criterion=nn.KLDivLoss()
+
 	outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
 	norm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-	#     len(outputs['hidden_states']) = 33
-	# last_hidden_state = outputs['hidden_states'] # [bs, seq_len, hidden_state]
 	last_logits = outputs["logits"] # torch.Size([6, 512, 32000])
 	
 	with torch.no_grad():
-		# teacher_outputs = teacher_model(input_ids.to(td))['hidden_states']
 		teacher_outputs = teacher_model(input_ids.to(teacher_model.device), 
-										attention_mask=attention_mask.to(teacher_model.device))["logits"]
+										attention_mask=attention_mask.to(teacher_model.device))
+		teacher_logits = teacher_outputs["logits"]
 
-	# print(last_logits.shape, teacher_outputs.shape)    # torch.Size([6, 512, 32000]) torch.Size([6, 512, 32000])
+	tensor1 = outputs["router_logits"]
+	tensor2 = teacher_outputs["router_logits"]
+	# print(attention_mask.size(), attention_mask.sum())
+	expert_loss = 100 * expert_logits_loss(tensor1, tensor2, attention_mask.view(-1), criterion=criterion)
 	dl_list = []
-	dl = forward_kl(last_logits, teacher_outputs.to(model.device), input_ids, attention_mask, labels).to(last_logits.dtype) + \
-		reverse_kl(last_logits, teacher_outputs.to(model.device), input_ids, attention_mask, labels).to(last_logits.dtype)
-	# dl = criterion(last_logits, teacher_outputs.to(model.device))
+	dl = forward_kl(last_logits, teacher_logits.to(model.device), input_ids, attention_mask, labels).to(last_logits.dtype) + \
+		reverse_kl(last_logits, teacher_logits.to(model.device), input_ids, attention_mask, labels).to(last_logits.dtype)
 	dl_list.append(dl)
-	# for idx in align_list:
-	#     dl_item = criterion(last_logits[idx], teacher_outputs[idx].to(sd))
-	#     dl_list.append(dl_item)
-	#     dl += dl_item
-	# loss = norm_loss + 0.1*dl / len(align_list)
-	loss = norm_loss + dl 
-	return loss, dl, norm_loss, dl_list
+
+	loss = expert_loss + dl + norm_loss
+	return loss, dl, norm_loss, dl_list, expert_loss
 
 def train_model(model, teacher_model, train_loader, val_loader, opt):
 	epochs = opt.epochs
@@ -188,7 +201,7 @@ def train_model(model, teacher_model, train_loader, val_loader, opt):
 	scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=epochs*len(train_loader)/accum_iter,eta_min=1e-6)
 	align_list = opt.align_list
 	
-	writer = SummaryWriter(f'runs/{opt.save_name}')
+	writer = SummaryWriter(f'runs/{opt.save_name}_new')
 	for epoch in range(epochs):
 		if opt.do_eval:
 			model.eval()
@@ -197,29 +210,30 @@ def train_model(model, teacher_model, train_loader, val_loader, opt):
 				for data in tqdm(val_loader):
 					input_ids, attention_mask, labels = data['input_ids'].to(model.device), data['attention_mask'].to(model.device), data['labels'].to(model.device)
 					if opt.use_distill:
-						loss, distill_loss, norm_loss, dl_list = compute_loss(model, teacher_model, input_ids, attention_mask, labels, align_list)
+						loss, distill_loss, norm_loss, dl_list, expert_loss = compute_loss(model, teacher_model, input_ids, attention_mask, labels, align_list)
 					else:
 						loss = compute_norm_loss(model, input_ids, attention_mask, labels)
 					val_loss += loss.detach().item()
 				print(f'Epoch {epoch}, Validation Loss: {val_loss / len(val_loader)}')
 		model.train()
-		nl, dl = 0, 0
+		nl, dl, el = 0, 0, 0
 		dl_list_all = [0 for _ in range(len(align_list))]
 		for batch_idx, data in enumerate(tqdm(train_loader)):
 			input_ids, attention_mask, labels = data['input_ids'].to(model.device), data['attention_mask'].to(model.device), data['labels'].to(teacher_model.device)
 
 			#### computing loss
 			if opt.use_distill:
-				loss, distill_loss, norm_loss, dl_list = compute_loss(model, teacher_model, input_ids, attention_mask, labels, align_list)
+				loss, distill_loss, norm_loss, dl_list, expert_loss = compute_loss(model, teacher_model, input_ids, attention_mask, labels, align_list)
 			else:
 				norm_loss = compute_norm_loss(model, input_ids, attention_mask, labels)
 				loss = norm_loss
 				distill_loss = 0
 			if batch_idx == 0:
-				print(norm_loss, distill_loss)
+				print("nl,dl,el:",norm_loss, distill_loss, expert_loss)
 
 			nl += norm_loss.detach().item()
 			if opt.use_distill:
+				el += expert_loss.detach().item()
 				dl += distill_loss.detach().item()
 			#     for i, layer_idx in enumerate(align_list):
 			#         dl_list_all[i] += dl_list[i].detach().item()
@@ -239,6 +253,7 @@ def train_model(model, teacher_model, train_loader, val_loader, opt):
 				#     for i, layer_idx in enumerate(align_list):
 				#         writer.add_scalar(f'distill_loss/Train_{layer_idx}', dl_list_all[i], epoch * len(train_loader) + batch_idx)
 					writer.add_scalar('distill_loss/Train', dl / accum_iter, epoch * len(train_loader) + batch_idx)
+					writer.add_scalar('expert_loss/Train', el / accum_iter, epoch * len(train_loader) + batch_idx)
 				nl, dl = 0, 0
 				dl_list_all = [0 for _ in range(len(align_list))]
 				optimizer.step()        # 更新模型
@@ -252,6 +267,45 @@ def preprocess_data(batch, tokenizer):
 	inputs = tokenizer(batch['text'], padding="max_length", truncation=True, max_length=512, return_tensors="pt")
 	inputs["labels"] = inputs.input_ids.clone()
 	return inputs
+
+def get_all_dataset(tokenizer, sample_num, seed):
+	test_num = min(sample_num//10, 100)
+	with open('../path.json','r') as f:
+		paths = json.load(f)
+		c4_path = paths["c4"]
+		fineweb_path = paths["fineweb"]
+		bagel_path = paths["bagel_json"]
+		openhermes_path = paths["openhermes"]
+		wikitext_path = paths["wikitext"]
+
+	c4 = load_dataset("parquet", data_dir=c4_path)
+	bagel = load_dataset("json", data_files=bagel_path)
+	openhermes = load_dataset("json", data_files=openhermes_path)
+	fineweb = load_dataset("parquet", data_files=fineweb_path)
+	wikitext = load_dataset("parquet", data_files=wikitext_path)
+
+	all_text = c4["validation"]["text"][:30000] + fineweb["train"]["text"][:25000] + bagel["train"]["text"][:15000] + openhermes["train"]["text"][:20000] + wikitext["train"]["text"][:15000]
+	combined_dataset = Dataset.from_dict({"text": all_text})
+
+	fineweb_train = combined_dataset.train_test_split(test_size=test_num, seed=seed)
+	train_data = fineweb_train['train'].select(range(sample_num))
+	test_data = fineweb_train['test']
+	# train_data.shuffle(seed)
+	all_train_data = train_data.map(
+		functools.partial(
+		preprocess_data,
+		tokenizer=tokenizer
+	), batched=True)
+	all_test_data = test_data.map(
+		functools.partial(
+		preprocess_data,
+		tokenizer=tokenizer
+	), batched=True)
+	all_train_data.set_format(type="torch", columns=["input_ids", "labels", "attention_mask"])
+	all_test_data.set_format(type="torch", columns=["input_ids", "labels", "attention_mask"])
+	all_train_data.shuffle(seed)
+	all_test_data.shuffle(seed)
+	return all_train_data, all_test_data
 
 def get_c4_dataset(tokenizer, sample_num, seed):
 	test_num = min(sample_num//10, 100)
@@ -288,9 +342,9 @@ def get_fineweb_dataset(tokenizer, sample_num=24000, seed=42):
 	test_num = min(sample_num//10, 100)
 
 	### use bagel
-	wikitext = load_dataset("parquet", data_files="/home/bcds/On-the-Fly_MoE_Inference/wikitext-2/data/train-00000-of-00001.parquet")
-	fineweb = load_dataset("json", data_files="/home/bcds/On-the-Fly_MoE_Inference/bagel-v0.5/processed_data.json")
-	# fineweb = load_dataset("parquet", data_files="/home/bcds/venv/dilab/floe/dataset/finewebedu/sample/10BT/000_00000.parquet")
+	# wikitext = load_dataset("parquet", data_files="/home/bcds/On-the-Fly_MoE_Inference/wikitext-2/data/train-00000-of-00001.parquet")
+	wikitext = load_dataset("json", data_files="/home/bcds/On-the-Fly_MoE_Inference/bagel-v0.5/processed_data.json")
+	fineweb = load_dataset("parquet", data_files="/home/bcds/venv/dilab/floe/dataset/finewebedu/sample/10BT/000_00000.parquet")
 	# fineweb = load_dataset("json", data_files="/home/zyx/moe/fineweb-edu/fineweb_edu_sample100000.json")
 
 	dataset_1 = wikitext['train']['text'][:15000] 
@@ -339,8 +393,8 @@ def main():
 	batch_size  = opt.batch_size
 
 	random.seed(42)
-	fineweb_train_data, fineweb_test_data = get_c4_dataset(tokenizer, sample_num=sample_num, seed = 42)
-	# fineweb_train_data, fineweb_test_data = get_fineweb_dataset(tokenizer, sample_num=sample_num)
+	# fineweb_train_data, fineweb_test_data = get_all_dataset(tokenizer, sample_num=sample_num, seed = 42)
+	fineweb_train_data, fineweb_test_data = get_fineweb_dataset(tokenizer, sample_num=sample_num)
 	train_loader = DataLoader(fineweb_train_data, batch_size=batch_size, shuffle=True)
 	val_loader = DataLoader(fineweb_test_data, batch_size=batch_size, shuffle=False)
 
@@ -348,7 +402,7 @@ def main():
 	# opt.save_name = f'{sparsity}_{sample_num}_new_{opt.align_list[0]}'
 	opt.save_name = f'{sparsity}_{sample_num}'
 	if opt.has_atten:
-		opt.save_name += '_c4_atten'
+		opt.save_name += '_expert_atten'
 	print(f"Start training {opt.save_name}")
 	train_model(student, teacher, train_loader, val_loader, opt=opt)
 
