@@ -9,5 +9,6 @@ triton/
 hqq-master/
 bagel-v0.5/
 OpenHermes-2.5/
+wikitext-2/
 *.pyc
 *.out
