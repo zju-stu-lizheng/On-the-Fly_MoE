@@ -85,7 +85,7 @@ def load_thresholds(threshold_path, use_average=True, zero = False):
     global up_th
     if zero:
         up_th = [[0] * 8] * 32
-        # print(up_th)
+        print(up_th)
         return
     if use_average:
         up_th = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds_2"]
@@ -643,7 +643,7 @@ class MixtralBlockSparseTop2MLP(nn.Module):
         if self.token_sum == 0:
             print("counting start....")
             print(self.up_threshold.device)
-            return
+            return 0
         return self.count_sum/self.token_sum
 
     def forward(self, hidden_states):
@@ -655,12 +655,15 @@ class MixtralBlockSparseTop2MLP(nn.Module):
             self.up_proj_states = up_result.detach().cpu()
             up_proj_states = up_result
         else:
-            ### Threshold method
-            up_proj_states = torch.where(up_result.abs() > self.up_threshold.to(hidden_states.device), up_result, 0.0, )
-            ### Calculate actual preserved ratio
-            true_ratio = (up_proj_states != 0).sum().item()
-            self.count_sum += true_ratio
-            self.token_sum += up_proj_states.numel()
+            if self.layeridx == 0:
+                up_proj_states = up_result
+            else:
+                ### Threshold method
+                up_proj_states = torch.where(up_result.abs() > self.up_threshold.to(hidden_states.device), up_result, 0.0, )
+                ### Calculate actual preserved ratio
+                true_ratio = (up_proj_states != 0).sum().item()
+                self.count_sum += true_ratio
+                self.token_sum += up_proj_states.numel()
         
         true_value = up_proj_states * gate_proj_states
 
