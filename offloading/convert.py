@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import time
 import torch.nn.functional as F
+from config import get_gpu_layers
 
 class CachedMLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, dtype, sparsity: float = 0.2,
@@ -148,7 +149,6 @@ class CachedMLP(nn.Module):
         final_hidden_states = down_x_device1_expert0 * expert_weights[0] + down_x_device1_expert1 * expert_weights[1]
         return final_hidden_states
           
-
 def load_thresholds(threshold_path, use_average=True):
     """
     load thresholds from path
@@ -167,6 +167,7 @@ def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9, backends='bitblas',
     """
     prefill_layers 指固定在device上的层数，便于prefill阶段的使用
     """
+    gpu_layers = get_gpu_layers(prefill_layers)
     device_number = int(device[-1])
     ### 其他部分存放在device上
     llm.model.embed_tokens.cuda(device_number)
@@ -189,20 +190,20 @@ def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9, backends='bitblas',
                 llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(device_number)
                 llm.model.layers[i].block_sparse_moe.experts[j].w3.device = device
 
-    #### 先替换第 0-prefill_layers 层的forward函数
     up_th = load_thresholds(f'{threshold_path}/thresholds_0_8.pt', use_average=False)
-    for i in range(0, prefill_layers):
-        for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
-            llm.model.layers[i].block_sparse_moe.experts[j].threshold = up_th[i][j].cuda(device_number)
-            llm.model.layers[i].block_sparse_moe.experts[j].w2t = llm.model.layers[i].block_sparse_moe.experts[j].w2.weight.T.contiguous().cuda(device_number)
-            llm.model.layers[i].block_sparse_moe.experts[j].w1.cuda(device_number)
-            llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(device_number)
-            llm.model.layers[i].block_sparse_moe.experts[j].forward = llm.model.layers[i].block_sparse_moe.experts[j].kernel_forward
-            # llm.model.layers[i].block_sparse_moe.experts[j].forward = llm.model.layers[i].block_sparse_moe.experts[j].old_forward
-
-    for i in range(prefill_layers, 32):
-        for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
-            llm.model.layers[i].block_sparse_moe.experts[j].forward = llm.model.layers[i].block_sparse_moe.experts[j].old_forward
+    # for i in gpu_layers:
+    for i in range(0, 32):
+        if i in gpu_layers:
+            for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
+                llm.model.layers[i].block_sparse_moe.experts[j].threshold = up_th[i][j].cuda(device_number)
+                llm.model.layers[i].block_sparse_moe.experts[j].w2t = llm.model.layers[i].block_sparse_moe.experts[j].w2.weight.T.contiguous().cuda(device_number)
+                llm.model.layers[i].block_sparse_moe.experts[j].w1.cuda(device_number)
+                llm.model.layers[i].block_sparse_moe.experts[j].w3.cuda(device_number)
+                llm.model.layers[i].block_sparse_moe.experts[j].forward = llm.model.layers[i].block_sparse_moe.experts[j].kernel_forward
+                # llm.model.layers[i].block_sparse_moe.experts[j].forward = llm.model.layers[i].block_sparse_moe.experts[j].old_forward
+        else:
+            for j in range(len(llm.model.layers[0].block_sparse_moe.experts)):
+                llm.model.layers[i].block_sparse_moe.experts[j].forward = llm.model.layers[i].block_sparse_moe.experts[j].old_forward
 
     llm.model.norm.cuda(device_number)
     llm.lm_head.cuda(device_number)
@@ -227,7 +228,7 @@ def convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.9, backends='bitblas',
     cached_mlps = [buffer0, buffer1]
     
     for i, layer in enumerate(llm.model.layers):
-        if i < prefill_layers :
+        if i in gpu_layers:
             continue
         print(f"... loading layer {i} for pipelineLLM")
         # 将专家的forward方法替换为PipelineLLM管理的方式

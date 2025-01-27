@@ -1,5 +1,5 @@
 unuse/
-
+kernels_test_mixtral.ipynb
 *.txt
 *.pt
 *.out

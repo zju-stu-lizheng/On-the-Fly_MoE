@@ -1,7 +1,7 @@
 import os
 import time
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,1,2"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "4,1,2"
 os.environ["TOKENIZERS_PARALLELISM"] = "False"
 from modeling_mixtral import MixtralForCausalLM
 from transformers import AutoTokenizer
@@ -21,9 +21,8 @@ from hqq.utils.patching import prepare_for_inference
 from convert import convert_mixtral_to_cached_mlp
 from pipelinellm import PipelineLLM
 import json
-
-# save log to file
-logging.basicConfig(filename=f'eval.log', level=logging.INFO)
+import argparse
+parser = argparse.ArgumentParser()
 
 class BaseHQQHFModel(BaseHQQModel):
     # Save model architecture
@@ -51,7 +50,7 @@ class BaseHQQHFModel(BaseHQQModel):
 class MixtralHQQ(MixtralPatch, BaseHQQHFModel):
     pass
 
-def get_model(model_name, ):
+def get_model(model_name, prefill_layers):
     save_dir = './hqqsaved'
     dtype = torch.float16
     backend       = "bitblas" #'torchao_int4' #"torchao_int4" (4-bit only) or "gemlite" (4-bit + 2-bit)
@@ -69,7 +68,6 @@ def get_model(model_name, ):
     device_map = {layer_idx: 'cuda:1' if layer_idx <= 16 else 'cuda:2' for layer_idx in range(1, 32)}
 
     # prefill_layers = 6  ### 固定在device上的MLP层数
-    prefill_layers = 6
     llm, cached_mlps = convert_mixtral_to_cached_mlp(llm, dtype, sparsity=0.8, backends=backend, 
                                                     device='cuda:0', device_map=device_map, threshold_path = threshold_path, prefill_layers=prefill_layers)
 
@@ -216,8 +214,6 @@ def eval(PLLM, tokenizer, texts):
                 f'*******************\n')
             logging.info(f"the number of reloaded experts per token:{(reloaded_experts/num_tokens):.3f}")
 
-
-
 with open('../path.json', 'r') as f:
     path = json.load(f)
     model_name = '/data/Mixtral-8x7B'
@@ -237,7 +233,15 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-PLLM, tokenizer = get_model(model_name=model_name)
+
+parser.add_argument("--prefill_layers", type=int, default=6)
+args = parser.parse_args()
+prefill_layers = args.prefill_layers
+print('prefill_layers: ', prefill_layers)
+
+# save log to file
+logging.basicConfig(filename=f'eval{prefill_layers}.log', level=logging.INFO)
+PLLM, tokenizer = get_model(model_name=model_name, prefill_layers=prefill_layers)
 texts = prepare_texts(sharegpt_json)
 eval(PLLM, tokenizer, texts)
 

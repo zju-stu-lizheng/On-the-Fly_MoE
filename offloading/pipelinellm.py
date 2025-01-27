@@ -5,6 +5,7 @@ import threading
 import time
 import json
 import torch.nn.functional as F
+from config import get_gpu_layers
 
 class Expert_Predictor(nn.Module):
     def __init__(self, layer_idx: int = 0, input_dim: int = 4096, hidden_dim: int = 512, output_dim: int = 8, dtype = torch.float16,
@@ -40,7 +41,8 @@ class PipelineLLM:
         self.device_map = device_map
         self.cached_mlps = cached_mlps  # [buffer0, buffer1]
         self.num_layers = len(llm.model.layers)
-        self.offload_startid = prefill_layers
+        # self.offload_startid = prefill_layers
+        self.gpu_layers = get_gpu_layers(prefill_layers)
 
         self.use_buffer0 = True  # 标记当前使用哪个缓冲区
         self.print_layer_info = print_layer_info
@@ -317,7 +319,7 @@ class PipelineLLM:
                     if self.print_layer_info:
                         print("in prefill layer ", layer_idx)
 
-                    if layer_idx < self.offload_startid:
+                    if layer_idx in self.gpu_layers:
                         final_hidden_states, router_logits = layer.block_sparse_moe(hidden_states)
                     else:
                         ### 模拟，这里把hidden_states传到experts在的地方
@@ -395,7 +397,8 @@ class PipelineLLM:
                     
                     next_buffer_index = 1 if self.use_buffer0 else 0
                     next_layer_idx = layer_idx + 1
-                    if self.offload_startid <= next_layer_idx < self.num_layers:
+                    if (next_layer_idx not in self.gpu_layers) and (next_layer_idx < self.num_layers):
+                    # if self.offload_startid <= next_layer_idx < self.num_layers:
                         ### 使用下一个缓冲区进行加载
                         next_buffer = self.cached_mlps[next_buffer_index]
                         stream = self.stream1 if self.use_buffer0 else self.stream0
@@ -444,7 +447,16 @@ class PipelineLLM:
                     expert_weights = routing_weights[0]
                     # print('the right experts is', expert_ids)
                     ## tensor([6, 7], device='cuda:0')
-                    if layer_idx >= self.offload_startid:
+                    if layer_idx in self.gpu_layers:
+                        final_hidden_states_expert0 = layer.block_sparse_moe.experts[expert_ids[0]](
+                            hidden_states=hidden_states) * expert_weights[0]
+
+                        final_hidden_states_expert1 = layer.block_sparse_moe.experts[expert_ids[1]](
+                            hidden_states=hidden_states) * expert_weights[1]
+
+                        # 将两个专家的结果相加
+                        final_hidden_states = final_hidden_states_expert0 + final_hidden_states_expert1
+                    else:
                         ### 等待完全加载
                         cur_stream.synchronize()
                         ### 判断加载是否正确
@@ -452,7 +464,6 @@ class PipelineLLM:
                         
                         # 判断expert_ids和predict_experts是否包含相同数据（忽略顺序）
                         # if not torch.equal(torch.sort(expert_ids)[0], torch.sort(predict_experts)[0]):
-
                         if not torch.equal((1 << expert_ids[0]) + (1 << expert_ids[1] ),(1 << predict_experts[0]) + (1 << predict_experts[1])):
                             ### 不吻合，重新加载
                             self._load_conflict_layer(
@@ -466,15 +477,6 @@ class PipelineLLM:
                         ### 使用当前缓冲区进行 MLP 计算 ###
                         final_hidden_states = current_buffer(hidden_states, expert_weights, 
                                                              expert_ids, layer_idx = layer_idx)
-                    else:
-                        final_hidden_states_expert0 = layer.block_sparse_moe.experts[expert_ids[0]](
-                            hidden_states=hidden_states) * expert_weights[0]
-
-                        final_hidden_states_expert1 = layer.block_sparse_moe.experts[expert_ids[1]](
-                            hidden_states=hidden_states) * expert_weights[1]
-
-                        # 将两个专家的结果相加
-                        final_hidden_states = final_hidden_states_expert0 + final_hidden_states_expert1
 
                     final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
 
