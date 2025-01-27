@@ -77,9 +77,10 @@ def prepare_model(model_name, is_eval=False, has_atten=False, sparsity=80):
 		print(f"set sparsity to {sparsity}")
 		### 包装lora模块
 		rank = 32
-		target_modules = ["w1","w2","w3"]
+		target_modules = ["w1","w2","w3","gate"]
 		if has_atten:
 			target_modules += ["q_proj","k_proj","v_proj","o_proj",]
+		# target_modules = ["gate"]
 		peft_config = LoraConfig(
 			lora_alpha=32,
 			lora_dropout=0.01,
@@ -87,6 +88,7 @@ def prepare_model(model_name, is_eval=False, has_atten=False, sparsity=80):
 			bias="none",
 			target_modules=target_modules,
 			layers_to_transform=[i for i in range(32) if i != 0],
+			# layers_to_transform=[1],
 			task_type="CAUSAL_LM"
 		)
 		#### 加载lora模型并merge
@@ -149,18 +151,20 @@ def forward_kl(logits, teacher_logits, input_ids, attention_mask, labels):
 	return distil_loss
 
 def expert_logits_loss(logits, teacher_logits, attention_mask, criterion=nn.KLDivLoss()):
-	expert_loss = torch.tensor(0.0, device=logits[0].device, dtype=torch.float16)
-	for layerid in range(2, 32):
-		tensor1 = logits[layerid]
-		tensor2 = teacher_logits[layerid]
+	expert_loss = torch.tensor(0.0, device=logits[0].device, dtype=torch.float32)
+	for layerid in range(1, 32):
+		tensor1 = logits[layerid].to(torch.float32)
+		tensor2 = teacher_logits[layerid].to(torch.float32)
 
 		mask = attention_mask.unsqueeze(-1).expand_as(tensor1)
 		masked_tensor1 = tensor1 * mask.to(tensor1.device)
 		masked_tensor2 = tensor2 * mask.to(tensor2.device)
 		
-		tensor1 = F.softmax(tensor1, dim=0)
-		tensor2 = F.softmax(tensor2, dim=0)
-		expert_loss += criterion(tensor1.log(), tensor2.to(tensor1.device))
+		tensor1 = F.softmax(masked_tensor1, dim=-1)
+		tensor2 = F.softmax(masked_tensor2, dim=-1)
+		cur_loss = criterion(tensor1.log(), tensor2.to(tensor1.device))
+		# print(f'layer {layerid}: ', cur_loss.item())
+		expert_loss += cur_loss
 
 	return expert_loss
 
@@ -182,7 +186,7 @@ def compute_loss(model, teacher_model, input_ids, attention_mask, labels, align_
 	tensor1 = outputs["router_logits"]
 	tensor2 = teacher_outputs["router_logits"]
 	# print(attention_mask.size(), attention_mask.sum())
-	expert_loss = 100 * expert_logits_loss(tensor1, tensor2, attention_mask.view(-1), criterion=criterion)
+	expert_loss = expert_logits_loss(tensor1, tensor2, attention_mask.view(-1), criterion=criterion).to(last_logits.dtype)
 	dl_list = []
 	dl = forward_kl(last_logits, teacher_logits.to(model.device), input_ids, attention_mask, labels).to(last_logits.dtype) + \
 		reverse_kl(last_logits, teacher_logits.to(model.device), input_ids, attention_mask, labels).to(last_logits.dtype)
@@ -402,7 +406,7 @@ def main():
 	# opt.save_name = f'{sparsity}_{sample_num}_new_{opt.align_list[0]}'
 	opt.save_name = f'{sparsity}_{sample_num}'
 	if opt.has_atten:
-		opt.save_name += '_expert_atten'
+		opt.save_name += '_gate_atten_2'
 	print(f"Start training {opt.save_name}")
 	train_model(student, teacher, train_loader, val_loader, opt=opt)
 
