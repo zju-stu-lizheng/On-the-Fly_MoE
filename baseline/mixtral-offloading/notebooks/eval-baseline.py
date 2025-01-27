@@ -5,10 +5,25 @@ import torch
 import numpy
 import os
 import sys
+sys.path.append("../")
+from hqq.core.quantize import BaseQuantizeConfig
+from src.build_model import OffloadConfig, QuantConfig, build_model
 import argparse
 import logging
 
-sys.path.append("../../mixtral-offloading")
+def get_max_gpu_memory_usage():
+    """
+    获取当前 GPU 显存的最大占用值（以 MB 为单位）。
+
+    返回:
+    float: 显存的最大占用值（MB）。
+    """
+    if torch.cuda.is_available():  # 检查是否有可用的 GPU
+        max_memory_allocated = torch.cuda.max_memory_allocated()  # 获取最大显存占用（字节）
+        max_memory_allocated_mb = max_memory_allocated / (1024 ** 2)  # 转换为 MB
+        return max_memory_allocated_mb
+    else:
+        raise RuntimeError("没有可用的 GPU。")
 
 def get_model(model_name, device_map, dtype=torch.bfloat16, use_cache=True):
     llm = MixtralForCausalLM.from_pretrained(
@@ -69,14 +84,14 @@ def main(args):
     else:
         raise ValueError(f'Unknown framework: {args.framework}')
 
-    eval(model, model_name = "/data/Mixtral-8x7B")
+    eval(model, model_name = "/data2/lz/Mixtral-8x7B")
 
 
 def init_deepspeed_mii():
     import deepspeed
     from transformers.deepspeed import HfDeepSpeedConfig
 
-    model_id = "mistralai/Mixtral-8x7B-v0.1"
+    model_id = "/data2/lz/Mixtral-8x7B"
     ds_config = {
         "bf16": {
             "enabled": True,
@@ -107,9 +122,6 @@ def init_deepspeed_mii():
 
 
 def init_mixtral_offload(args):
-    from hqq.core.quantize import BaseQuantizeConfig
-    from src.build_model import OffloadConfig, QuantConfig, build_model
-
     quantized = args.quantized
 
     if not quantized:
@@ -124,7 +136,8 @@ def init_mixtral_offload(args):
     device = torch.device("cuda:0")
 
     ##### Change this to 5 if you have only 12 GB of GPU VRAM #####
-    offload_per_layer = 2
+    offload_per_layer = args.offload_layers
+    logging.info(f"use {offload_per_layer} layers")
     # offload_per_layer = 7
     ###############################################################
 
@@ -176,7 +189,7 @@ def eval(model, model_name):
 
     device = torch.device("cuda:0")
 
-    path_json = '/data/fiddler-main/benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json'
+    path_json = '/data2/lz/fiddler-main/benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json'
     with open(path_json, 'r') as f:
         data = json.load(f)
     texts = []
@@ -190,7 +203,7 @@ def eval(model, model_name):
     random.seed(0)
     random.shuffle(texts)
 
-    n_sample = 3
+    n_sample = 2
 
     # model_name = "mistralai/Mixtral-8x7B-Instruct-v0.1"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -237,6 +250,8 @@ def eval(model, model_name):
                 f'time: {time_sum / n_sample:.2f}, '
                 f'token/s: {num_tokens / (time_sum):.3f}\n'
                 f'*******************\n')
+    memory_cost = get_max_gpu_memory_usage()
+    logging.info(f"use {memory_cost} MB")
 
 
 if __name__ == "__main__":
@@ -244,6 +259,10 @@ if __name__ == "__main__":
     parser.add_argument(
         '--quantized', action='store_true',
         help='Whether to use quantized model in mixtral-offloading.'
+    )
+    parser.add_argument(
+        '--offload_layers', type=int,
+        help='load how much in mixtral-offloading.'
     )
     parser.add_argument(
         '--framework',
@@ -258,5 +277,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # save log to file
-    logging.basicConfig(filename=f'eval{args.framework}.log', level=logging.INFO)
+    logging.basicConfig(filename=f'eval{args.framework}-{args.offload_layers}.log', level=logging.INFO)
     main(args)
