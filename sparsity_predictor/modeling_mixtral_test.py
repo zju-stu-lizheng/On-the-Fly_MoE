@@ -112,7 +112,7 @@ def set_skip_layer_idx(layer_idx):
     print(skip_layer_idx)
 
 up_th = None
-def load_thresholds(threshold_path, use_average=True, zero = False, use_type="gate"):
+def load_thresholds(threshold_path, use_average=True, zero = False, use_type="up"):
     """
     load thresholds from path
     """

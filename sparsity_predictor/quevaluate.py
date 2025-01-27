@@ -4,10 +4,25 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "False"
 import torch
 import math
-from modeling_mixtral import load_thresholds
-from utils import myevaluate, get_model
+from modeling_mixtral_predict import MixtralForCausalLM, load_thresholds
+from transformers import AutoTokenizer
+from utils import myevaluate
 import json 
 import argparse
+from peft import PeftModelForCausalLM
+
+def get_model(model_name, device_map, dtype=torch.bfloat16, use_cache=True):
+    llm = MixtralForCausalLM.from_pretrained(
+        model_name,
+        device_map=device_map,
+        use_cache=use_cache,
+        torch_dtype=dtype,
+    ) 
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    return llm, tokenizer
 
 def doeval(dtype, lora_save_path, args):
 	threshold_path_name=args.threshold_path
@@ -29,6 +44,14 @@ def doeval(dtype, lora_save_path, args):
 	else:
 		load_thresholds(f'{threshold_path}/thresholds_{filepath}.pt', use_average=use_average,)
 	llm, tokenizer = get_model(model_name, device_map, dtype=dtype, use_cache=False)
+	if lora_save_path != './saved/training/lora_weights.pt':
+		print(f'load lora model: {lora_save_path}')
+		llm = PeftModelForCausalLM.from_pretrained(llm, lora_save_path, 'default')
+		# 合并 LoRA 权重进行推理
+		llm = llm.merge_and_unload()
+		print('merge done')
+	else:
+		print('not loading lora model')
 			
 	# task_name_list=['arc_challenge']
 	task_name_list = args.task_name_list
