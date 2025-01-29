@@ -112,7 +112,7 @@ def set_skip_layer_idx(layer_idx):
     print(skip_layer_idx)
 
 up_th = None
-def load_thresholds(threshold_path, use_average=True, zero = False, use_type="up"):
+def load_thresholds(threshold_path, use_average=True, zero = False, use_type="gate"):
     """
     load thresholds from path
     """
@@ -126,10 +126,14 @@ def load_thresholds(threshold_path, use_average=True, zero = False, use_type="up
     print(f"Thresholds loaded from {threshold_path}")
     # return thresholds
 
+
 def set_print_info(flag = True):
     global print_info
     print_info = flag
 
+# sparsity = 80
+# set_th_sparsity(sparsity)
+# print('sparsity:',sparsity)
 
 class TreeNode:
     def __init__(self, name):
@@ -760,11 +764,11 @@ class MixtralBLockSparseTop2MLP(nn.Module):
         super().__init__()
         self.ffn_dim = config.intermediate_size
         self.hidden_dim = config.hidden_size
-        # try:
-        #     self.sparsity_selection = config.sparsity_selection
-        # except:
-        #     print("using default up...")
-        self.sparsity_selection = "up"
+        try:
+            self.sparsity_selection = config.sparsity_selection
+        except:
+            print("using default gate...")
+            self.sparsity_selection = "gate"
         self.layer_idx = layer_idx
         self.expert_idx = expert_idx
 
@@ -772,7 +776,7 @@ class MixtralBLockSparseTop2MLP(nn.Module):
         self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)
         self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
         # if not profile_threshold:
-        self.up_threshold = torch.tensor(up_th[self.layer_idx][self.expert_idx])
+        self.threshold = torch.tensor(up_th[self.layer_idx][self.expert_idx])
 
         self.count_sum = 0
         self.token_sum = 0
@@ -800,173 +804,85 @@ class MixtralBLockSparseTop2MLP(nn.Module):
             return 0
         return self.count_sum/self.token_sum
 
-    # def forward(self, hidden_states, routing_weights, preatt_score=None):
-    #     # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
-    #     activation = self.act_fn(self.w1(hidden_states)) 
-    #     up_result = self.w3(hidden_states)
-
-    #     if self.sparsity_selection == "gate":
-    #         activation = torch.where(torch.abs(activation) > self.threshold.to(hidden_states.device),
-    #             activation, 0.0, )
-    #         true_ratio = (activation != 0).sum().item()
-    #         current_hidden_states = up_result * activation
-    #     elif self.sparsity_selection == "up":
-    #         up_result = torch.where(torch.abs(up_result) > self.threshold.to(hidden_states.device),
-    #             up_result, 0.0, )
-    #         true_ratio = (up_result != 0).sum().item()
-    #         current_hidden_states = up_result * activation
-    #     else:
-    #         current_hidden_states = up_result * activation
-    #         current_hidden_states = torch.where(torch.abs(current_hidden_states) > self.threshold.to(hidden_states.device),
-    #             current_hidden_states, 0.0, )
-    #         true_ratio = (current_hidden_states != 0).sum().item()
-    #     self.count_sum += true_ratio
-    #     self.token_sum += current_hidden_states.numel()
-
-    #     current_hidden_states = self.w2(current_hidden_states)
-    #     return routing_weights * current_hidden_states
-
     def forward(self, hidden_states, routing_weights, preatt_score=None):
         # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
         activation = self.act_fn(self.w1(hidden_states)) 
         up_result = self.w3(hidden_states)
-        if preatt_score != None:
-            up_pre_result = self.w3(preatt_score)
-            v = torch.abs(up_pre_result)
 
-        global th
-        if profile_mode:
-            ## 统计分布
-            global x_all
-            global x_small
-            
-            if profile_x_pos:
-                global x_pos
-                mask = (v >= th[self.layer_idx][self.expert_idx]).to(hidden_states.dtype)
-                nonzero_counts = torch.sum(mask != 0, dim=tuple(range(mask.dim() - 1))).cpu()
-                # print(nonzero_counts.shape) # 14336
-                x_pos[self.layer_idx][self.expert_idx] += nonzero_counts
-            
-            if(self.layer_idx is not None and self.expert_idx is not None):
-                x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
-                for i in range(step):
-                    x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (1.0/step)*(i+1) ).item()
-            current_hidden_states = activation * self.w3(hidden_states)
+        if self.sparsity_selection == "gate":
+            activation = torch.where(torch.abs(activation) > self.threshold.to(hidden_states.device),
+                activation, 0.0, )
+            true_ratio = (activation != 0).sum().item()
+            current_hidden_states = up_result * activation
+        elif self.sparsity_selection == "up":
+            up_result = torch.where(torch.abs(up_result) > self.threshold.to(hidden_states.device),
+                up_result, 0.0, )
+            true_ratio = (up_result != 0).sum().item()
+            current_hidden_states = up_result * activation
         else:
-            if self.layer_idx != 0 and self.layer_idx != 31:
-                # _, indices1 = torch.topk(v, self.activenum, dim=1)
-                # indices1 = indices1[0]
-                # mask = (v.to(hidden_states.device) >= self.up_threshold.to(hidden_states.device)).to(hidden_states.dtype)
-                up_proj_states = torch.where(v > self.up_threshold.to(hidden_states.device),
-                        up_result, 0.0, )
-                ### Calculate actual preserved ratio
-                true_ratio = (up_proj_states != 0).sum().item()
-                self.count_sum += true_ratio
-                self.token_sum += up_proj_states.numel()
-                
-            # #### 动态预测数据采集
-            # if profile_sparsity and self.layer_idx == skip_layer_idx:
-            #     dataset_x[self.expert_idx].append(preatt_score)
-            #     dataset_y[self.expert_idx].append(v)
-                current_hidden_states = up_proj_states * activation
-            else:
-                current_hidden_states = up_result * activation
+            current_hidden_states = up_result * activation
+            current_hidden_states = torch.where(torch.abs(current_hidden_states) > self.threshold.to(hidden_states.device),
+                current_hidden_states, 0.0, )
+            true_ratio = (current_hidden_states != 0).sum().item()
+        self.count_sum += true_ratio
+        self.token_sum += current_hidden_states.numel()
+
         current_hidden_states = self.w2(current_hidden_states)
         return routing_weights * current_hidden_states
 
-class MixtralSdpaAttention(MixtralAttention):
-    """
-    Mixtral attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
-    `MixtralAttention` as the weights of the module stays untouched. The only changes are on the forward pass to adapt to
-    SDPA API.
-    """
+    # def forward(self, hidden_states, routing_weights, preatt_score=None):
+    #     # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
+    #     activation = self.act_fn(self.w1(hidden_states)) 
+    #     up_result = self.w3(hidden_states)
+    #     # if preatt_score != None:
+    #     #     up_pre_result = self.w3(preatt_score)
+    #     #     v = torch.abs(up_pre_result)
 
-    # Adapted from MixtralAttention.forward
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        if output_attentions:
-            # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
-            logger.warning_once(
-                "MixtralModel is using MixtralSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
-                'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-            )
-            return super().forward(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_value,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-            )
+    #     global th
+    #     if profile_mode:
+    #         ## 统计分布
+    #         global x_all
+    #         global x_small
+            
+    #         if profile_x_pos:
+    #             global x_pos
+    #             mask = (v >= th[self.layer_idx][self.expert_idx]).to(hidden_states.dtype)
+    #             nonzero_counts = torch.sum(mask != 0, dim=tuple(range(mask.dim() - 1))).cpu()
+    #             # print(nonzero_counts.shape) # 14336
+    #             x_pos[self.layer_idx][self.expert_idx] += nonzero_counts
+            
+    #         if(self.layer_idx is not None and self.expert_idx is not None):
+    #             x_all[self.layer_idx][self.expert_idx] += torch.numel(v)
+    #             for i in range(step):
+    #                 x_small[self.layer_idx][self.expert_idx][i] += torch.sum( v < (1.0/step)*(i+1) ).item()
+    #         current_hidden_states = activation * self.w3(hidden_states)
+    #     else:
+    #         # if self.layer_idx != 0:
+    #             # _, indices1 = torch.topk(v, self.activenum, dim=1)
+    #             # indices1 = indices1[0]
+    #             # mask = (v.to(hidden_states.device) >= self.up_threshold.to(hidden_states.device)).to(hidden_states.dtype)
+    #             # if self.layer_idx >= 15:
+    #             #     up_proj_states = torch.where(v > self.up_threshold.to(hidden_states.device),
+    #             #          up_pre_result, 0.0, )
+    #             # else:
+    #             up_proj_states = torch.where(v > self.up_threshold.to(hidden_states.device),
+    #                     up_result, 0.0, )
+    #             ### Calculate actual preserved ratio
+    #             
+    #         # #### 动态预测数据采集
+    #         # if profile_sparsity and self.layer_idx == skip_layer_idx:
+    #         #     dataset_x[self.expert_idx].append(preatt_score)
+    #         #     dataset_y[self.expert_idx].append(v)
+    #             current_hidden_states = up_proj_states * activation
+    #         # else:
+    #         #     current_hidden_states = up_result * activation
+    #     current_hidden_states = self.w2(current_hidden_states)
+    #     return routing_weights * current_hidden_states
 
-        bsz, q_len, _ = hidden_states.size()
-
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
-        if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        causal_mask = attention_mask
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-
-        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
-        # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
-
-        # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
-        # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-        # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
-        is_causal = True if causal_mask is None and q_len > 1 else False
-
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=causal_mask,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=is_causal,
-        )
-
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, -1)
-
-        attn_output = self.o_proj(attn_output)
-
-        return attn_output, None, past_key_value
 
 MISTRAL_ATTENTION_CLASSES = {
     "eager": MixtralAttention,
     "flash_attention_2": MixtralFlashAttention2,
-    "sdpa": MixtralSdpaAttention,
 }
 
 

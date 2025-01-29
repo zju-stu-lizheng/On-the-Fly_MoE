@@ -5,7 +5,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "False"
 import torch
 import math
 from modeling_mixtral_predict import MixtralForCausalLM, load_thresholds
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, BitsAndBytesConfig
 from utils import myevaluate
 import json 
 import argparse
@@ -44,31 +44,16 @@ class BaseHQQHFModel(BaseHQQModel):
 
 class MixtralHQQ(MixtralPatch, BaseHQQHFModel):
     pass
-
-
-import torch
-
-class CompensatedModel(torch.nn.Module):
-    def __init__(self, model, path, layerid, expertid):
-        super(CompensatedModel, self).__init__()
-        self.model = model
-        ### self.A and self.B_prime are initialized as the values loaded from the file
-        self.A = torch.load(path + f'A_{layerid}_{expertid}.pt').to(torch.float16).to(model.device)
-        self.B_prime = torch.load(path + f'B_prime_{layerid}_{expertid}.pt').to(torch.float16).to(model.device)
-        
-
-    def forward(self, input_ids):
-        outputs = self.model(input_ids)
-        residual = (input_ids @ self.A.T) @ self.B_prime.T
-        outputs += residual
-    
-        return outputs
-		
+ 
 def get_model(model_name, device_map, dtype=torch.bfloat16, use_cache=True):
+	quantization_config = BitsAndBytesConfig(load_in_8bit=True,
+										  llm_int8_skip_modules=["embed_tokens", "lm_head", "w3"])
+
 	llm = MixtralForCausalLM.from_pretrained(
 		model_name,
 		device_map=device_map,
 		use_cache=use_cache,
+		quantization_config=quantization_config,
 		torch_dtype=dtype,
 	) 
 	# save_dir = '/home/bcds/On-the-Fly_MoE_Inference/offloading/hqqsaved'
@@ -111,20 +96,12 @@ def doeval(dtype, lora_save_path, args):
 	else:
 		print('not loading lora model')
 
-	### 对up进行int2量化
-	q3_config    = BaseQuantizeConfig(nbits=2, group_size=64)
+	# q3_config    = BaseQuantizeConfig(nbits=2, group_size=64)
 
-	quant_config = {
-		'block_sparse_moe.experts.w3'  :q3_config,
-	}
-	MixtralHQQ.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)  
-	# for i in range(32):
-	# 	print(f"Layer {i} done...")
-	# 	for j in range(8):
-	# 		llmdevice = llm.model.layers[i].block_sparse_moe.experts[j].w3.device
-	# 		llm.model.layers[i].block_sparse_moe.experts[j].w3 = \
-	# 		CompensatedModel(llm.model.layers[i].block_sparse_moe.experts[j].w3, '/home/bcds/On-the-Fly_MoE_Inference/quantize/saved/', layerid=i, expertid=j).to(llmdevice)
-        
+	# quant_config = {
+	# 	'block_sparse_moe.experts.w3'  :q3_config,
+	# }
+	# MixtralHQQ.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)  
 	print(llm)
 	# task_name_list=['arc_challenge']
 	task_name_list = args.task_name_list
