@@ -112,12 +112,12 @@ def doeval(dtype, lora_save_path, args):
 		print('not loading lora model')
 
 	### 对up进行int2量化
-	q3_config    = BaseQuantizeConfig(nbits=2, group_size=64)
+	# q3_config    = BaseQuantizeConfig(nbits=2, group_size=64)
 
-	quant_config = {
-		'block_sparse_moe.experts.w3'  :q3_config,
-	}
-	MixtralHQQ.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)  
+	# quant_config = {
+	# 	'block_sparse_moe.experts.w3'  :q3_config,
+	# }
+	# MixtralHQQ.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)  
 	# for i in range(32):
 	# 	print(f"Layer {i} done...")
 	# 	for j in range(8):
@@ -138,6 +138,8 @@ if __name__ == '__main__':
 	parser.add_argument("--threshold_path", type=str, default='training_sparsity_path')
 	parser.add_argument("--use_average", action='store_true', help='use average threshold')
 	parser.add_argument("--sparsity_level", type=float, default=0.8)
+	parser.add_argument("--num_fewshot", type=int, default=0)
+
 	args = parser.parse_args()
 	lora_save_path = args.lora_path
 	dtype = torch.float16

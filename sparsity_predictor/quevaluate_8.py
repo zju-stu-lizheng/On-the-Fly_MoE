@@ -96,12 +96,14 @@ def doeval(dtype, lora_save_path, args):
 	else:
 		print('not loading lora model')
 
-	# q3_config    = BaseQuantizeConfig(nbits=2, group_size=64)
+	q3_config    = BaseQuantizeConfig(nbits=2, group_size=64)
 
-	# quant_config = {
-	# 	'block_sparse_moe.experts.w3'  :q3_config,
-	# }
-	# MixtralHQQ.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)  
+	quant_config = {
+		'block_sparse_moe.experts.w1'  :q3_config,
+		'block_sparse_moe.experts.w2'  :q3_config,
+		'block_sparse_moe.experts.w3'  :q3_config,
+	}
+	MixtralHQQ.quantize_model(llm, quant_config=quant_config, compute_dtype=dtype, device=device_map)  
 	print(llm)
 	# task_name_list=['arc_challenge']
 	task_name_list = args.task_name_list

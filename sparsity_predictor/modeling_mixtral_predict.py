@@ -828,6 +828,7 @@ class MixtralBLockSparseTop2MLP(nn.Module):
 
     def forward(self, hidden_states, routing_weights, preatt_score=None):
         # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
+        # hidden_states
         activation = self.act_fn(self.w1(hidden_states)) 
         up_result = self.w3(hidden_states)
         if preatt_score != None:

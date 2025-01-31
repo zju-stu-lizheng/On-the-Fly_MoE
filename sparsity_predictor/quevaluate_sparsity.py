@@ -65,13 +65,15 @@ class CompensatedModel(torch.nn.Module):
         return outputs
         
 def get_model(model_name, device_map, dtype=torch.bfloat16, use_cache=True, sparsity_selection="gate"):
-    llmconfig = MixtralConfig(sparsity_selection=sparsity_selection, use_cache=False)
+    # from transformers import MixtralForCausalLM
+    llmconfig = MixtralConfig(sparsity_selection=sparsity_selection, use_cache=True)
     llm = MixtralForCausalLM.from_pretrained(
         model_name,
         config=llmconfig,
         device_map=device_map,
         torch_dtype=dtype,
     ) 
+    llm.config.use_cache = True
     # save_dir = '/home/bcds/On-the-Fly_MoE_Inference/offloading/hqqsaved'
     # dtype = torch.float16
     # llm = MixtralHQQ.from_quantized(save_dir, compute_dtype=dtype, device='cuda:0', use_cache=True)
@@ -115,7 +117,7 @@ def doeval(dtype, lora_save_path, args):
         
     # print(llm)
     task_name_list = args.task_name_list
-    num_fewshot = 0
+    num_fewshot = args.num_fewshot
     myevaluate(task_name_list, llm, tokenizer, num_fewshot, 'cuda')
 
 if __name__ == '__main__':
@@ -126,9 +128,11 @@ if __name__ == '__main__':
     parser.add_argument("--threshold_path", type=str, default='training_sparsity_path')
     parser.add_argument("--use_average", action='store_true', help='use average threshold')
     parser.add_argument("--sparsity_level", type=float, default=0.8)
+    parser.add_argument("--num_fewshot", type=int, default=0)
+
     args = parser.parse_args()
     lora_save_path = args.lora_path
     dtype = torch.float16
     print('lora_save_path: ', lora_save_path, dtype)
-    print('task_name_list: ', args.task_name_list)
+    print(args)
     doeval(dtype, lora_save_path, args)
