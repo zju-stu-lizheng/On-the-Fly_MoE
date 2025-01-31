@@ -3,7 +3,6 @@ import json
 import os
 import csv
 from utils import get_model, set_seed
-import argparse
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
 ### from path.json read paths of model and dataset
@@ -13,13 +12,12 @@ with open('../path.json', 'r') as file:
     paths = json.load(file)
     model_path = paths.get(model_name, '')
     dataset_path = paths.get(dataset_name, '')
-    save_path = paths.get('mixtral_threshold','')
+    save_path = paths.get('mixtral_gate_threshold','')
     print('model path:', model_path, '\ndataset path:', dataset_path, '\nsave path:', save_path)
 
+set_seed(42)
 with open("../quantize/device_map_1.json", "r") as f:
     device_map = json.load(f)
-
-set_seed(42)
 model = get_model(model_path, device_map=device_map)
 
 # %%
@@ -33,35 +31,26 @@ def get_batch(data, batch_size, block_size):
     return x, y
 
 # %%
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--sparsity_level", type=float, default=0.8)
-args = parser.parse_args()
-print(args)
-
-sparsity_level = args.sparsity_level
+sparsity_level = 0.8
+print(sparsity_level)
 # device = 'cuda:1'
 device_2 = 'cuda:2'
 avg_loss = 0.0
-n_batch = 64 * 2
+n_batch = 64 
 # n_batch = 2
 # accum_steps = 4 
-accum_steps = 1
-batch_size = 2
-block_size = 512
+accum_steps = 2
+batch_size = 1
+block_size = 1024
 torch.manual_seed(42)
 n_layers = len(model.model.layers)
 n_experts = len(model.model.layers[0].block_sparse_moe.experts)
 
 up_proj_states_thresholds = [torch.zeros([n_experts,]) for _ in range(n_layers)]
-gate_proj_states_thresholds = [torch.zeros([n_experts,]) for _ in range(n_layers)]
-down_proj_states_thresholds = [torch.zeros([n_experts,]) for _ in range(n_layers)]
 gate_proj_states_mean_squares = [[torch.zeros(model.config.intermediate_size) for _ in range(n_experts)] for _ in range(n_layers)]
 
-up_states = [[torch.zeros([accum_steps * batch_size * block_size , model.config.intermediate_size], device=device_2) for _ in range(n_experts)] for _ in range(n_layers)]
-gate_states = [[torch.zeros([accum_steps * batch_size * block_size , model.config.intermediate_size], device=device_2) for _ in range(n_experts)] for _ in range(n_layers)]
-down_states = [[torch.zeros([accum_steps * batch_size * block_size , model.config.intermediate_size], device=device_2) for _ in range(n_experts)] for _ in range(n_layers)]
-
+up_states = [[torch.zeros([accum_steps * batch_size * block_size , model.config.intermediate_size]) for _ in range(n_experts)] for _ in range(n_layers)]
+gate_states = [[torch.zeros([accum_steps * batch_size * block_size , model.config.intermediate_size]) for _ in range(n_experts)] for _ in range(n_layers)]
 
 with torch.no_grad():
     for step in range(n_batch // accum_steps):
@@ -78,19 +67,16 @@ with torch.no_grad():
                 for expert_idx in range(n_experts):
                     counts = all_counts[layer_idx * n_experts + expert_idx]
 
-                    states = model.model.layers[layer_idx].block_sparse_moe.experts[expert_idx].up_proj_states.reshape(-1, model.config.intermediate_size)
+                    states = model.model.layers[layer_idx].block_sparse_moe.experts[expert_idx].gate_proj_states.reshape(-1, model.config.intermediate_size)
                     cur_counts = states.size(0)
                     # print('counts and cur_counts:',counts, cur_counts)
                     # print(states.size())
                     # print(up_states[layer_idx][expert_idx][counts : counts+cur_counts, :].size())
                     up_states[layer_idx][expert_idx][counts : counts+cur_counts, :] = states
 
-                    states = model.model.layers[layer_idx].block_sparse_moe.experts[expert_idx].gate_proj_states.reshape(-1, model.config.intermediate_size)
+                    states = model.model.layers[layer_idx].block_sparse_moe.experts[expert_idx].up_proj_states.reshape(-1, model.config.intermediate_size)
                     gate_states[layer_idx][expert_idx][counts : counts+cur_counts, :] = states
                     # counts += cur_counts
-                    states = model.model.layers[layer_idx].block_sparse_moe.experts[expert_idx].down_proj_states.reshape(-1, model.config.intermediate_size)
-                    down_states[layer_idx][expert_idx][counts : counts+cur_counts, :] = states
-
                     all_counts[layer_idx * n_experts + expert_idx] += cur_counts
 
         for layer_idx in range(n_layers):   
@@ -99,54 +85,52 @@ with torch.no_grad():
                 useful_num = all_counts[layer_idx * n_experts + expert_idx]
                 topk_num = int(useful_num * model.config.intermediate_size * sparsity_level)
                 up_proj_states_thresholds[layer_idx][expert_idx] += up_states[layer_idx][expert_idx][0:useful_num,:].to(device_2).abs().flatten().kthvalue(topk_num).values.to('cpu')
-                gate_proj_states_thresholds[layer_idx][expert_idx] += gate_states[layer_idx][expert_idx][0:useful_num,:].to(device_2).abs().flatten().kthvalue(topk_num).values.to('cpu')
-                down_proj_states_thresholds[layer_idx][expert_idx] += down_states[layer_idx][expert_idx][0:useful_num,:].to(device_2).abs().flatten().kthvalue(topk_num).values.to('cpu')
+                gate_proj_states_mean_squares[layer_idx][expert_idx] += (torch.sum(gate_states[layer_idx][expert_idx][0:useful_num,:].to(device_2) ** 2, dim=0).to('cpu') / useful_num).to('cpu')
 
+### up 和 gate上面手动换了位置
 for layer_idx in range(n_layers):
     for expert_idx in range(n_experts):
+        gate_proj_states_mean_squares[layer_idx][expert_idx] /= n_batch // accum_steps
         up_proj_states_thresholds[layer_idx][expert_idx] /= n_batch // accum_steps
-        gate_proj_states_thresholds[layer_idx][expert_idx] /= n_batch // accum_steps
-        down_proj_states_thresholds[layer_idx][expert_idx] /= n_batch // accum_steps
 
 
 # %%
-# importance_thresholds = [torch.zeros([n_experts,]) for _ in range(n_layers)]
-# up_proj_states_thresholds_2 = [[torch.zeros(model.config.intermediate_size) for _ in range(n_experts)] for _ in range(n_layers)]
+importance_thresholds = [torch.zeros([n_experts,]) for _ in range(n_layers)]
+up_proj_states_thresholds_2 = [[torch.zeros(model.config.intermediate_size) for _ in range(n_experts)] for _ in range(n_layers)]
 
-# with torch.no_grad():
-#     for step in range(n_batch // accum_steps):
-#         print(step * accum_steps)
-#         all_counts = [0 for _ in range(n_layers * n_experts)]
-#         for batch_idx in range(accum_steps):
-#             inputs, labels = get_batch(datasets['validation'], batch_size, block_size)
-#             inputs = inputs.cuda()
-#             outputs = model(inputs, labels=inputs)
-#             avg_loss = avg_loss + outputs.loss / n_batch
+with torch.no_grad():
+    for step in range(n_batch // accum_steps):
+        print(step * accum_steps)
+        all_counts = [0 for _ in range(n_layers * n_experts)]
+        for batch_idx in range(accum_steps):
+            inputs, labels = get_batch(datasets['train'], batch_size, block_size)
+            inputs = inputs.cuda()
+            outputs = model(inputs, labels=inputs)
+            avg_loss = avg_loss + outputs.loss / n_batch
 
-#             for layer_idx in range(n_layers):
-#                 for expert_idx in range(n_experts):
-#                     counts = all_counts[layer_idx * n_experts + expert_idx]
-#                     states = model.model.layers[layer_idx].block_sparse_moe.experts[expert_idx].up_proj_states.reshape(-1, states.size(-1))
-#                     cur_counts = states.size(0)
-#                     up_states[layer_idx][expert_idx][counts:cur_counts+counts, :] = states
-#                     # counts += cur_counts
-#                     all_counts[layer_idx * n_experts + expert_idx] += cur_counts
+            for layer_idx in range(n_layers):
+                for expert_idx in range(n_experts):
+                    counts = all_counts[layer_idx * n_experts + expert_idx]
+                    states = model.model.layers[layer_idx].block_sparse_moe.experts[expert_idx].gate_proj_states.reshape(-1, states.size(-1))
+                    cur_counts = states.size(0)
+                    up_states[layer_idx][expert_idx][counts:cur_counts+counts, :] = states
+                    # counts += cur_counts
+                    all_counts[layer_idx * n_experts + expert_idx] += cur_counts
                 
-#         for layer_idx in range(n_layers):   
-#             for expert_idx in range(n_experts):
-#                 useful_num = all_counts[layer_idx * n_experts + expert_idx]
-#                 importance_scores = up_states[layer_idx][expert_idx][:useful_num,:] ** 2 * gate_proj_states_mean_squares[layer_idx][expert_idx]
-#                 importance_thresholds[layer_idx][expert_idx] += importance_scores.to(device_2).flatten().kthvalue(int(importance_scores.numel() * sparsity_level)).values.to('cpu')
+        for layer_idx in range(n_layers):   
+            for expert_idx in range(n_experts):
+                useful_num = all_counts[layer_idx * n_experts + expert_idx]
+                importance_scores = up_states[layer_idx][expert_idx][:useful_num,:] ** 2 * gate_proj_states_mean_squares[layer_idx][expert_idx]
+                importance_thresholds[layer_idx][expert_idx] += importance_scores.to(device_2).flatten().kthvalue(int(importance_scores.numel() * sparsity_level)).values.to('cpu')
 
-# for layer_idx in range(n_layers):
-#     for expert_idx in range(n_experts):
-#         importance_thresholds[layer_idx][expert_idx] /= n_batch // accum_steps
-#         up_proj_states_thresholds_2[layer_idx][expert_idx] = (importance_thresholds[layer_idx][expert_idx].expand_as(up_proj_states_thresholds_2[layer_idx][expert_idx]) / gate_proj_states_mean_squares[layer_idx][expert_idx]) ** 0.5
+for layer_idx in range(n_layers):
+    for expert_idx in range(n_experts):
+        importance_thresholds[layer_idx][expert_idx] /= n_batch // accum_steps
+        up_proj_states_thresholds_2[layer_idx][expert_idx] = (importance_thresholds[layer_idx][expert_idx].expand_as(up_proj_states_thresholds_2[layer_idx][expert_idx]) / gate_proj_states_mean_squares[layer_idx][expert_idx]) ** 0.5
 
-thresholds = {'up_proj_states_thresholds': up_proj_states_thresholds, 
-            'gate_proj_states_thresholds': gate_proj_states_thresholds,
-            'down_proj_states_thresholds': down_proj_states_thresholds}
+thresholds = {'gate_proj_states_thresholds': up_proj_states_thresholds, 'gate_proj_states_thresholds_2': up_proj_states_thresholds_2}
 
+# torch.save(thresholds, f'{save_path}/thresholds_0_8.pt')
 sp = str(sparsity_level).replace('.', '_')
 print('save in:', f'{save_path}/thresholds_{sp}.pt')
 torch.save(thresholds, f'{save_path}/thresholds_{sp}.pt')

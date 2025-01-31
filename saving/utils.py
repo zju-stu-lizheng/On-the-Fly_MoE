@@ -6,6 +6,10 @@ import modeling_mixtral_up
 import numpy as np
 from datasets import load_dataset
 from transformers import AutoTokenizer
+from configuration_phimoe import PhiMoEConfig
+from modeling_phimoe import PhiMoEForCausalLM
+from configuration_deepseek import DeepseekV2Config
+from modeling_deepseek import DeepseekV2ForCausalLM
 
 MAX_LENGTH = 512
 
@@ -19,7 +23,7 @@ def get_model(model_path, device_map='auto'):
             torch_dtype=torch.float16,
         )
         set_th_sparsity(sparsity)
-    else:
+    elif 'Mixtral' in model_path:
         model = MixtralForCausalLM.from_pretrained(
             model_path,
             device_map=device_map,
@@ -28,6 +32,27 @@ def get_model(model_path, device_map='auto'):
             # attn_implementation="flash_attention_2"
         )
         modeling_mixtral_up.set_th_sparsity(sparsity)
+    elif 'Phi' in model_path:
+        # configuration = PhiMoEConfig.from_pretrained(model_path)
+        model = PhiMoEForCausalLM.from_pretrained(
+            model_path,
+            device_map=device_map,
+            # config=configuration,
+            use_cache=False,
+            torch_dtype=torch.float16,
+            trust_remote_code=False,  
+            # attn_implementation="flash_attention_2"
+        )
+    else:
+        model = DeepseekV2ForCausalLM.from_pretrained(
+            model_path,
+            device_map=device_map,
+            # config=configuration,
+            use_cache=False,
+            torch_dtype=torch.float16,
+            trust_remote_code=False,  
+            # attn_implementation="flash_attention_2"
+        )
     
     print(f'with sparsity of {sparsity}')
     return model
