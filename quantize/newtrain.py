@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from tqdm import tqdm
 from transformers import AutoTokenizer, MixtralConfig
-from transformers import MixtralForCausalLM as MixtralTeacher
+from modeling_teacher import MixtralForCausalLM as MixtralTeacher
 from modeling_mixtral import MixtralForCausalLM, set_profile_mode, load_thresholds
 from peft import LoraConfig, get_peft_model, PeftModel
 import functools
@@ -174,19 +174,28 @@ def compute_loss(model, teacher_model, input_ids, attention_mask, labels, align_
 	"""
 	criterion=nn.KLDivLoss()
 
-	outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-	norm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-	last_logits = outputs["logits"] # torch.Size([6, 512, 32000])
-	
 	with torch.no_grad():
 		teacher_outputs = teacher_model(input_ids.to(teacher_model.device), 
 										attention_mask=attention_mask.to(teacher_model.device))
 		teacher_logits = teacher_outputs["logits"]
+		teacher_new_masks = teacher_outputs["router_logits"]
+		teacher_masks = []
+		teacher_routers = []
+		for i in range(32):
+			teacher_masks.append(teacher_new_masks[i][0])
+			teacher_routers.append(teacher_new_masks[i][1])
+
+		# print(teacher_masks, len(teacher_masks))
+
+	outputs = model(input_ids, attention_mask=attention_mask, labels=labels, teacher_masks=teacher_masks)
+	norm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+	last_logits = outputs["logits"] # torch.Size([6, 512, 32000])
 
 	tensor1 = outputs["router_logits"]
-	tensor2 = teacher_outputs["router_logits"]
+	tensor2 = teacher_routers
 	# print(attention_mask.size(), attention_mask.sum())
 	expert_loss = expert_logits_loss(tensor1, tensor2, attention_mask.view(-1), criterion=criterion).to(last_logits.dtype)
+	# expert_loss = torch.tensor(0.0, dtype=torch.float16)
 	dl_list = []
 	dl = forward_kl(last_logits, teacher_logits.to(model.device), input_ids, attention_mask, labels).to(last_logits.dtype) + \
 		reverse_kl(last_logits, teacher_logits.to(model.device), input_ids, attention_mask, labels).to(last_logits.dtype)

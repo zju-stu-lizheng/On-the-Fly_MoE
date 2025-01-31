@@ -69,30 +69,6 @@ logger = logging.get_logger(__name__)
 _CHECKPOINT_FOR_DOC = "mistralai/Mixtral-8x7B-v0.1"
 _CONFIG_FOR_DOC = "MixtralConfig"
 
-profile_threshold = False
-
-def set_profile_mode(mode):
-    global profile_threshold
-    profile_threshold = mode
-    print(f"Set profile_threshold to {mode}")
-
-up_th = None
-def load_thresholds(threshold_path, use_average=True, zero = False):
-    """
-    load thresholds from path
-    """
-    # f"{chess_up_threshold}/thresholds_0_8.pt"
-    global up_th
-    if zero:
-        up_th = [[0] * 8] * 32
-        print(up_th)
-        return
-    if use_average:
-        up_th = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds_2"]
-    else:
-        up_th = torch.load(threshold_path, map_location='cuda')["up_proj_states_thresholds"]
-    print(f"Thresholds loaded from {threshold_path}")
-    # return thresholds
 
 def load_balancing_loss_func(
     gate_logits: Union[torch.Tensor, Tuple[torch.Tensor], None],
@@ -607,67 +583,23 @@ MIXTRAL_ATTENTION_CLASSES = {
     "sdpa": MixtralSdpaAttention,
 }
 
+
 class MixtralBlockSparseTop2MLP(nn.Module):
-    def __init__(self, config: MixtralConfig, layeridx: int = 0, expertidx: int = 0):
+    def __init__(self, config: MixtralConfig):
         super().__init__()
-        self.layeridx = layeridx
-        self.expertidx = expertidx
         self.ffn_dim = config.intermediate_size
         self.hidden_dim = config.hidden_size
 
         self.w1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
         self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)
         self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
-        if not profile_threshold:
-            self.up_threshold = torch.tensor(up_th[self.layeridx][self.expertidx])
-        self.count_sum = 0
-        self.token_sum = 0
+
         self.act_fn = ACT2FN[config.hidden_act]
-    
-    def print_ratio(self):
-        """
-        print the average of self.ratio
-        """ 
-        if self.token_sum == 0:
-            print("counting start....")
-            print(self.up_threshold.device)
-            return
-        print(f'layer {self.layeridx} expert {self.expertidx} ratio: {self.count_sum/self.token_sum:.4f}')
-        self.count_sum = 0
-        self.token_sum = 0
-    
-    def get_ratio(self) -> float:
-        """
-        print the average of self.ratio
-        """ 
-        if self.token_sum == 0:
-            print("counting start....")
-            print(self.up_threshold.device)
-            return 0
-        return self.count_sum/self.token_sum
-
+        self.threshold=torch.tensor(0.0)
+        self.w2t=None
     def forward(self, hidden_states):
-        up_result = self.w3(hidden_states)
-        gate_proj_states = self.act_fn(self.w1(hidden_states))
-        # current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
-        if profile_threshold:
-            self.gate_proj_states = gate_proj_states.detach().cpu()
-            self.up_proj_states = up_result.detach().cpu()
-            up_proj_states = up_result
-        else:
-            if self.layeridx == 0:
-                up_proj_states = up_result
-            else:
-                ### Threshold method
-                up_proj_states = torch.where(up_result.abs() > self.up_threshold.to(hidden_states.device), up_result, 0.0, )
-                ### Calculate actual preserved ratio
-                true_ratio = (up_proj_states != 0).sum().item()
-                self.count_sum += true_ratio
-                self.token_sum += up_proj_states.numel()
-        
-        true_value = up_proj_states * gate_proj_states
-
-        current_hidden_states = self.w2(true_value)
+        current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
+        current_hidden_states = self.w2(current_hidden_states)
         return current_hidden_states
 
 
@@ -683,7 +615,7 @@ class MixtralSparseMoeBlock(nn.Module):
     and memory on padding.
     """
 
-    def __init__(self, config, layeridx: int = 0):
+    def __init__(self, config):
         super().__init__()
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.intermediate_size
@@ -693,12 +625,12 @@ class MixtralSparseMoeBlock(nn.Module):
         # gating
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
 
-        self.experts = nn.ModuleList([MixtralBlockSparseTop2MLP(config, layeridx, expertidx=i) for i in range(self.num_experts)])
+        self.experts = nn.ModuleList([MixtralBlockSparseTop2MLP(config) for _ in range(self.num_experts)])
 
         # Jitter parameters
         self.jitter_noise = config.router_jitter_noise
 
-    def forward(self, hidden_states: torch.Tensor, teacher_masks=None) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         if self.training and self.jitter_noise > 0:
@@ -724,10 +656,7 @@ class MixtralSparseMoeBlock(nn.Module):
         # Loop over all available experts in the model and perform the computation on each expert
         for expert_idx in range(self.num_experts):
             expert_layer = self.experts[expert_idx]
-            if teacher_masks is not None:
-                idx, top_x = torch.where(teacher_masks[expert_idx])
-            else:
-                idx, top_x = torch.where(expert_mask[expert_idx])
+            idx, top_x = torch.where(expert_mask[expert_idx])
 
             # Index the correct hidden states and compute the expert hidden state for
             # the current expert. We need to make sure to multiply the output hidden
@@ -739,18 +668,18 @@ class MixtralSparseMoeBlock(nn.Module):
             # the `top_x` tensor here.
             final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
         final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-        return final_hidden_states, router_logits
+        new_router_logits = (expert_mask, router_logits)
+        return final_hidden_states, new_router_logits
 
 
 class MixtralDecoderLayer(nn.Module):
     def __init__(self, config: MixtralConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.layer_idx = layer_idx
 
         self.self_attn = MIXTRAL_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
 
-        self.block_sparse_moe = MixtralSparseMoeBlock(config, layeridx=layer_idx)
+        self.block_sparse_moe = MixtralSparseMoeBlock(config)
         self.input_layernorm = MixtralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = MixtralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -764,7 +693,6 @@ class MixtralDecoderLayer(nn.Module):
         output_router_logits: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
-        teacher_masks = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -788,7 +716,7 @@ class MixtralDecoderLayer(nn.Module):
                 Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
                 into the model
         """
-        # print(self.layer_idx, hidden_states.device, self.input_layernorm.weight.device)
+
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -808,7 +736,7 @@ class MixtralDecoderLayer(nn.Module):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states, router_logits = self.block_sparse_moe(hidden_states,teacher_masks=teacher_masks)
+        hidden_states, expert_mask = self.block_sparse_moe(hidden_states)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -820,7 +748,7 @@ class MixtralDecoderLayer(nn.Module):
             outputs += (present_key_value,)
 
         if output_router_logits:
-            outputs += (router_logits,)
+            outputs += (expert_mask,)
 
         return outputs
 
@@ -992,7 +920,6 @@ class MixtralModel(MixtralPreTrainedModel):
         output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        teacher_masks = None,
     ) -> Union[Tuple, MoeModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_router_logits = (
@@ -1052,9 +979,7 @@ class MixtralModel(MixtralPreTrainedModel):
         all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
 
-        # for decoder_layer in self.layers:
-        for i in range(32):
-            decoder_layer = self.layers[i]
+        for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1080,7 +1005,6 @@ class MixtralModel(MixtralPreTrainedModel):
                     output_router_logits=output_router_logits,
                     use_cache=use_cache,
                     cache_position=cache_position,
-                    teacher_masks = teacher_masks[i]
                 )
 
             hidden_states = layer_outputs[0]
@@ -1313,7 +1237,6 @@ class MixtralForCausalLM(MixtralPreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
-        teacher_masks = None,
         **loss_kwargs,
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
         r"""
@@ -1370,7 +1293,6 @@ class MixtralForCausalLM(MixtralPreTrainedModel, GenerationMixin):
             output_router_logits=output_router_logits,
             return_dict=return_dict,
             cache_position=cache_position,
-            teacher_masks=teacher_masks
         )
 
         hidden_states = outputs[0]
@@ -1383,12 +1305,12 @@ class MixtralForCausalLM(MixtralPreTrainedModel, GenerationMixin):
 
         aux_loss = None
         if output_router_logits:
-            aux_loss = load_balancing_loss_func(
-                outputs.router_logits if return_dict else outputs[-1],
-                self.num_experts,
-                self.num_experts_per_tok,
-                attention_mask,
-            )
+            # aux_loss = load_balancing_loss_func(
+            #     outputs.router_logits if return_dict else outputs[-1],
+            #     self.num_experts,
+            #     self.num_experts_per_tok,
+            #     attention_mask,
+            # )
             if labels is not None:
                 loss += self.router_aux_loss_coef * aux_loss.to(loss.device)  # make sure to reside in the same device
 
