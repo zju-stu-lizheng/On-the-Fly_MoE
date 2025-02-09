@@ -1069,19 +1069,33 @@ class MixtralModel(MixtralPreTrainedModel):
                     output_router_logits,
                     use_cache,
                     cache_position,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    output_router_logits=output_router_logits,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
                     teacher_masks = teacher_masks[i]
                 )
+            else:
+                # print("----------not in self.gc") ### True
+                try:
+                    layer_outputs = decoder_layer(
+                        hidden_states,
+                        attention_mask=causal_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_values,
+                        output_attentions=output_attentions,
+                        output_router_logits=output_router_logits,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        teacher_masks = teacher_masks[i]
+                    )
+                except:
+                    layer_outputs = decoder_layer(
+                        hidden_states,
+                        attention_mask=causal_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_values,
+                        output_attentions=output_attentions,
+                        output_router_logits=output_router_logits,
+                        use_cache=use_cache,
+                        cache_position=cache_position
+                    )
 
             hidden_states = layer_outputs[0]
 

@@ -66,7 +66,8 @@ def prepare_model(model_name, is_eval=False, has_atten=False, sparsity=80):
 		model.eval()
 	else:
 		set_profile_mode(mode=False)
-		load_thresholds("/home/bcds/On-the-Fly_MoE_Inference/saving/threshold/c4_mixtral/thresholds_0_8.pt", use_average=False)
+		th_paths = str(sparsity/100).replace(".", "_")
+		load_thresholds(f"/home/bcds/On-the-Fly_MoE_Inference/saving/threshold/c4_mixtral/thresholds_{th_paths}.pt", use_average=False)
 		model = MixtralForCausalLM.from_pretrained(
 			pretrained_model_name_or_path=model_name,
 			config=config,
@@ -74,7 +75,7 @@ def prepare_model(model_name, is_eval=False, has_atten=False, sparsity=80):
 			device_map=sd,
 			# attn_implementation="flash_attention_2"
 		)
-		print(f"set sparsity to {sparsity}")
+		print(f"set sparsity to {sparsity} ", f"/home/bcds/On-the-Fly_MoE_Inference/saving/threshold/c4_mixtral/thresholds_{th_paths}.pt")
 		### 包装lora模块
 		rank = 32
 		target_modules = ["w1","w2","w3","gate"]
@@ -232,18 +233,18 @@ def train_model(model, teacher_model, train_loader, val_loader, opt):
 		nl, dl, el = 0, 0, 0
 		dl_list_all = [0 for _ in range(len(align_list))]
 		for batch_idx, data in enumerate(tqdm(train_loader)):
-			input_ids, attention_mask, labels = data['input_ids'].to(model.device), data['attention_mask'].to(model.device), data['labels'].to(teacher_model.device)
+			input_ids, attention_mask, labels = data['input_ids'].to(model.device), data['attention_mask'].to(model.device), data['labels'].to(model.device)
 
 			#### computing loss
 			if opt.use_distill:
 				loss, distill_loss, norm_loss, dl_list, expert_loss = compute_loss(model, teacher_model, input_ids, attention_mask, labels, align_list)
+				if batch_idx == 0:
+					print("nl,dl,el:",norm_loss, distill_loss, expert_loss)
 			else:
 				norm_loss = compute_norm_loss(model, input_ids, attention_mask, labels)
 				loss = norm_loss
 				distill_loss = 0
-			if batch_idx == 0:
-				print("nl,dl,el:",norm_loss, distill_loss, expert_loss)
-
+				
 			nl += norm_loss.detach().item()
 			if opt.use_distill:
 				el += expert_loss.detach().item()
@@ -391,7 +392,11 @@ def get_fineweb_dataset(tokenizer, sample_num=24000, seed=42):
 
 def main():
 	### 加载两个 model
-	model_name = '/home/bcds/venv/dilab/Mixtral-8x7B-v0.1'
+	with open('../path.json', 'r') as file:
+		paths = json.load(file)
+		fineweb_path = paths.get('fineweb', '')
+		model_name = paths.get('mixtral','')
+	# model_name = '/home/bcds/venv/dilab/Mixtral-8x7B-v0.1'
 	sparsity = opt.sparsity
 	if opt.use_distill:
 		teacher = prepare_model(model_name, is_eval=True)
@@ -415,7 +420,9 @@ def main():
 	# opt.save_name = f'{sparsity}_{sample_num}_new_{opt.align_list[0]}'
 	opt.save_name = f'{sparsity}_{sample_num}'
 	if opt.has_atten:
-		opt.save_name += '_gate_atten_2'
+		opt.save_name += '_gate_atten'
+	if not opt.use_distill:
+		opt.save_name += "_nodis"
 	print(f"Start training {opt.save_name}")
 	train_model(student, teacher, train_loader, val_loader, opt=opt)
 
