@@ -69,12 +69,22 @@ class CompensatedModel(torch.nn.Module):
         return outputs
 
 def get_model(model_name, device_map, dtype=torch.bfloat16, use_cache=True):
-    llm = MixtralForCausalLM.from_pretrained(
-        model_name,
-        device_map=device_map,
-        use_cache=use_cache,
-        torch_dtype=dtype,
-    ) 
+    if 'Llama' in model_name:
+        from modeling_llama_down import LlamaForCausalLM
+        # load_thresholds()
+        llm = LlamaForCausalLM.from_pretrained(
+            model_name,
+            # device_map=device_map,
+            use_cache=False,
+            torch_dtype=torch.float16,
+        ).cuda(0)
+    elif 'Mixtral' in model_name:
+        llm = MixtralForCausalLM.from_pretrained(
+            model_name,
+            device_map=device_map,
+            use_cache=use_cache,
+            torch_dtype=dtype,
+        ) 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -94,8 +104,10 @@ def myevaluate(task_name_list, model, tokenizer, num_fewshot, device):
     evaluate(task_name_list, model, tokenizer, num_fewshot, device)
     avg_list = []
     for layerid in range(32):
-        for expertid in range(8):
-            avg_list.append(model.model.layers[layerid].block_sparse_moe.experts[expertid].get_ratio())
+        # for expertid in range(8):
+        avg_list.append(model.model.layers[layerid].mlp.get_ratio())
+        model.model.layers[layerid].mlp.print_ratio()
+        # avg_list.append(model.model.layers[layerid].block_sparse_moe.experts[expertid].get_ratio())
     
     print('Average Sparsity: ', f'{sum(avg_list)/len(avg_list):.4f}')
     print('Max Sparsity: {:.4f}'.format(max(avg_list)))
