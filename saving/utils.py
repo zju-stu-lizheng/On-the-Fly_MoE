@@ -6,10 +6,6 @@ import modeling_mixtral_up
 import numpy as np
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from configuration_phimoe import PhiMoEConfig
-from modeling_phimoe import PhiMoEForCausalLM
-from configuration_deepseek import DeepseekV2Config
-from modeling_deepseek import DeepseekV2ForCausalLM
 
 MAX_LENGTH = 512
 
@@ -18,10 +14,10 @@ def get_model(model_path, device_map='auto'):
     if 'Llama' in model_path:
         model = LlamaForCausalLM.from_pretrained(
             model_path,
-            device_map=device_map,
+            # device_map=device_map,
             use_cache=False,
             torch_dtype=torch.float16,
-        )
+        ).cuda(0)
         set_th_sparsity(sparsity)
     elif 'Mixtral' in model_path:
         model = MixtralForCausalLM.from_pretrained(
@@ -33,8 +29,9 @@ def get_model(model_path, device_map='auto'):
         )
         modeling_mixtral_up.set_th_sparsity(sparsity)
     elif 'Phi' in model_path:
+        from modeling_phimoe import PhimoeForCausalLM
         # configuration = PhiMoEConfig.from_pretrained(model_path)
-        model = PhiMoEForCausalLM.from_pretrained(
+        model = PhimoeForCausalLM.from_pretrained(
             model_path,
             device_map=device_map,
             # config=configuration,
@@ -44,6 +41,8 @@ def get_model(model_path, device_map='auto'):
             # attn_implementation="flash_attention_2"
         )
     else:
+        from configuration_deepseek import DeepseekV2Config
+        from modeling_deepseek import DeepseekV2ForCausalLM
         model = DeepseekV2ForCausalLM.from_pretrained(
             model_path,
             device_map=device_map,

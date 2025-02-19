@@ -1,6 +1,7 @@
 import torch
 import math
-from modeling_mixtral import set_profile_mode, load_thresholds
+# from modeling_mixtral import set_profile_mode, load_thresholds
+from modeling_llama_down import load_thresholds
 from utils import myevaluate, get_model
 import json 
 import argparse
@@ -11,14 +12,14 @@ def doeval(dtype, lora_save_path, args):
 	use_average = args.use_average
 	with open('../path.json', 'r') as f:
 		path = json.load(f)
-		model_name = path['mixtral']
+		model_name = path['llama']
 		threshold_path = path[threshold_path_name]
 
 	with open('./device_map_1.json', 'r') as f:
 		device_map = json.load(f)
 	
 	## 开启稀疏模式
-	set_profile_mode(False)
+	# set_profile_mode(False)
 	filepath = str(args.sparsity_level).replace('.', '_')
 	if math.fabs(args.sparsity_level - 0) < 1e-5:
 		print('use zero sparsity')
